@@ -68,7 +68,26 @@ go vet ./...
 gofmt -w .
 ```
 
-When adding migrations / DB tooling, document the chosen commands here.
+### Migrations (goose)
+
+Migrations live in `migrations/` at the repo root, written as `-- +goose Up` / `-- +goose Down` SQL files.
+
+Install the CLI once:
+
+```powershell
+go install github.com/pressly/goose/v3/cmd/goose@latest
+```
+
+Run from the repo root (assumes `DATABASE_URL` is set, e.g. via `.env`):
+
+```powershell
+goose -dir migrations postgres $env:DATABASE_URL up        # apply all pending
+goose -dir migrations postgres $env:DATABASE_URL status    # show applied/pending
+goose -dir migrations postgres $env:DATABASE_URL down      # roll back last
+goose -dir migrations postgres $env:DATABASE_URL create <name> sql   # new migration
+```
+
+New migration filenames are timestamped (`YYYYMMDDHHMMSS_<name>.sql`).
 
 ## Hard constraints (refuse these — see `PRODUCT.md` and `SERVER.md`)
 
