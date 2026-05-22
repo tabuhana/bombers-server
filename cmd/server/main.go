@@ -5,10 +5,11 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/joho/godotenv"
+
+	"github.com/tabuhana/bombers-server/internal/config"
 )
 
 func main() {
@@ -16,9 +17,9 @@ func main() {
 		log.Fatalf("loading .env: %v", err)
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		log.Fatal("PORT environment variable is required")
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	r := chi.NewRouter()
@@ -27,7 +28,7 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	addr := ":" + port
+	addr := ":" + cfg.Port
 	log.Printf("listening on %s", addr)
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatal(err)
