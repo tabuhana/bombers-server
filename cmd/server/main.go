@@ -14,6 +14,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/store"
+	"github.com/tabuhana/bombers-server/internal/users"
 )
 
 func main() {
@@ -34,8 +35,11 @@ func main() {
 	}
 	defer pool.Close()
 
+	usersHandler := users.NewHandler(pool)
+
 	r := chi.NewRouter()
 	r.Get("/health", healthHandler(pool))
+	r.Post("/auth/register", usersHandler.Register)
 
 	addr := ":" + cfg.Port
 	log.Printf("listening on %s", addr)
