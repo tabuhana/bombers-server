@@ -81,3 +81,25 @@ func getUserByCanonical(ctx context.Context, pool *pgxpool.Pool, canonical strin
 	}
 	return &u, nil
 }
+
+const getUserByIDSQL = `
+SELECT id, username, username_canonical, password_hash, friend_code, created_at
+FROM users
+WHERE id = $1
+`
+
+// getUserByID looks up a user by primary key. Returns ErrUserNotFound when
+// no row matches — e.g. a still-valid access token for a since-deleted user.
+func getUserByID(ctx context.Context, pool *pgxpool.Pool, id string) (*User, error) {
+	var u User
+	err := pool.QueryRow(ctx, getUserByIDSQL, id).Scan(
+		&u.ID, &u.Username, &u.UsernameCanonical, &u.PasswordHash, &u.FriendCode, &u.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get user by id: %w", err)
+	}
+	return &u, nil
+}

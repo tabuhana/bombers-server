@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
 )
 
@@ -41,11 +43,12 @@ func mustGenerateDummyHash() []byte {
 }
 
 type Handler struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	issuer *auth.Issuer
 }
 
-func NewHandler(pool *pgxpool.Pool) *Handler {
-	return &Handler{pool: pool}
+func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer) *Handler {
+	return &Handler{pool: pool, issuer: issuer}
 }
 
 type registerRequest struct {
@@ -56,6 +59,16 @@ type registerRequest struct {
 type loginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+// loginResponse is the success body for POST /auth/login. The client decides
+// retention policy for these tokens (per SERVER.md — desktop hangs on long,
+// browser sessions hang on short). The server just issues both.
+type loginResponse struct {
+	User         PublicUser `json:"user"`
+	AccessToken  string     `json:"access_token"`
+	RefreshToken string     `json:"refresh_token"`
+	ExpiresIn    int        `json:"expires_in"` // seconds until access token expires
 }
 
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +144,48 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, user.Public())
+	access, exp, err := h.issuer.IssueAccessToken(user.ID)
+	if err != nil {
+		log.Printf("users: issue access token: %v", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "could not issue tokens")
+		return
+	}
+	refresh, _, err := h.issuer.IssueRefreshToken(user.ID)
+	if err != nil {
+		log.Printf("users: issue refresh token: %v", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "could not issue tokens")
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, loginResponse{
+		User:         user.Public(),
+		AccessToken:  access,
+		RefreshToken: refresh,
+		ExpiresIn:    int(time.Until(exp).Seconds()),
+	})
+}
+
+// Me returns the authenticated user. Mounted behind auth.Issuer.RequireAuth,
+// so the user id is always present in context; absence is a programming error
+// (mounted on the wrong group), reported as 401 to fail closed.
+func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
+	id, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	u, err := getUserByID(r.Context(), h.pool, id)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			// Valid-signature token for a deleted user — still 401.
+			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		log.Printf("users: get by id: %v", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "could not fetch user")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, u.Public())
 }
 
 // createUser assembles the row and inserts it, regenerating the friend code
