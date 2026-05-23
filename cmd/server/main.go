@@ -14,6 +14,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/config"
+	"github.com/tabuhana/bombers-server/internal/friends"
 	"github.com/tabuhana/bombers-server/internal/store"
 	"github.com/tabuhana/bombers-server/internal/users"
 )
@@ -37,16 +38,21 @@ func main() {
 	defer pool.Close()
 
 	issuer := auth.NewIssuer(cfg.TokenSecret)
-	usersHandler := users.NewHandler(pool, issuer)
+	authService := auth.NewService(issuer, pool)
+	authHandler := auth.NewHandler(authService)
+	usersHandler := users.NewHandler(pool, authService)
+	friendsHandler := friends.NewHandler(pool)
 
 	r := chi.NewRouter()
 	r.Get("/health", healthHandler(pool))
 	r.Post("/auth/register", usersHandler.Register)
 	r.Post("/auth/login", usersHandler.Login)
+	r.Post("/auth/refresh", authHandler.Refresh)
 
 	r.Group(func(r chi.Router) {
 		r.Use(issuer.RequireAuth)
 		r.Get("/me", usersHandler.Me)
+		r.Get("/friends/code", friendsHandler.MyCode)
 	})
 
 	addr := ":" + cfg.Port

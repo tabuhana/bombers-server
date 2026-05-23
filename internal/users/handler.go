@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/types"
 )
 
 const (
@@ -43,12 +43,12 @@ func mustGenerateDummyHash() []byte {
 }
 
 type Handler struct {
-	pool   *pgxpool.Pool
-	issuer *auth.Issuer
+	pool *pgxpool.Pool
+	auth *auth.Service
 }
 
-func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer) *Handler {
-	return &Handler{pool: pool, issuer: issuer}
+func NewHandler(pool *pgxpool.Pool, authSvc *auth.Service) *Handler {
+	return &Handler{pool: pool, auth: authSvc}
 }
 
 type registerRequest struct {
@@ -65,7 +65,7 @@ type loginRequest struct {
 // retention policy for these tokens (per SERVER.md — desktop hangs on long,
 // browser sessions hang on short). The server just issues both.
 type loginResponse struct {
-	User         PublicUser `json:"user"`
+	User         types.PublicUser `json:"user"`
 	AccessToken  string     `json:"access_token"`
 	RefreshToken string     `json:"refresh_token"`
 	ExpiresIn    int        `json:"expires_in"` // seconds until access token expires
@@ -144,24 +144,18 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	access, exp, err := h.issuer.IssueAccessToken(user.ID)
+	pair, err := h.auth.IssueInitialPair(r.Context(), user.ID)
 	if err != nil {
-		log.Printf("users: issue access token: %v", err)
-		httpx.WriteError(w, http.StatusInternalServerError, "could not issue tokens")
-		return
-	}
-	refresh, _, err := h.issuer.IssueRefreshToken(user.ID)
-	if err != nil {
-		log.Printf("users: issue refresh token: %v", err)
+		log.Printf("users: issue token pair: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not issue tokens")
 		return
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, loginResponse{
 		User:         user.Public(),
-		AccessToken:  access,
-		RefreshToken: refresh,
-		ExpiresIn:    int(time.Until(exp).Seconds()),
+		AccessToken:  pair.AccessToken,
+		RefreshToken: pair.RefreshToken,
+		ExpiresIn:    pair.ExpiresIn,
 	})
 }
 

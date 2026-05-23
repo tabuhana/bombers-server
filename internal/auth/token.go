@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/oklog/ulid/v2"
 )
 
 // Per SERVER.md "Auth model": short access token + long rotating refresh
-// token. Refresh-token rotation lands in the next step; this file only
-// issues and validates.
+// token. Rotation/persistence lives in Service (see service.go); this file
+// owns token shape, signing, and verification.
 const (
 	DefaultAccessTTL  = 15 * time.Minute
 	DefaultRefreshTTL = 30 * 24 * time.Hour
@@ -40,6 +41,7 @@ var (
 type Claims struct {
 	UserID    string
 	TokenType string
+	JTI       string // populated for refresh tokens; empty for access tokens
 	ExpiresAt time.Time
 }
 
@@ -63,16 +65,22 @@ func (i *Issuer) AccessTTL() time.Duration  { return i.accessTTL }
 func (i *Issuer) RefreshTTL() time.Duration { return i.refreshTTL }
 
 // IssueAccessToken returns a signed access JWT for userID along with its
-// absolute expiry time, so callers can advertise expires_in to clients.
+// absolute expiry time. Access tokens are stateless — no jti, no DB row.
 func (i *Issuer) IssueAccessToken(userID string) (string, time.Time, error) {
-	return i.issue(userID, tokenTypeAccess, i.accessTTL)
+	signed, exp, err := i.signClaims(userID, tokenTypeAccess, i.accessTTL, "")
+	return signed, exp, err
 }
 
-func (i *Issuer) IssueRefreshToken(userID string) (string, time.Time, error) {
-	return i.issue(userID, tokenTypeRefresh, i.refreshTTL)
+// IssueRefreshToken returns a signed refresh JWT for userID, the freshly
+// generated jti embedded in it, and the token's expiry. The jti is what
+// Service stores in the refresh_tokens table for rotation tracking.
+func (i *Issuer) IssueRefreshToken(userID string) (token string, jti string, exp time.Time, err error) {
+	jti = ulid.Make().String()
+	token, exp, err = i.signClaims(userID, tokenTypeRefresh, i.refreshTTL, jti)
+	return token, jti, exp, err
 }
 
-func (i *Issuer) issue(userID, typ string, ttl time.Duration) (string, time.Time, error) {
+func (i *Issuer) signClaims(userID, typ string, ttl time.Duration, jti string) (string, time.Time, error) {
 	now := time.Now()
 	exp := now.Add(ttl)
 	claims := jwt.MapClaims{
@@ -80,6 +88,9 @@ func (i *Issuer) issue(userID, typ string, ttl time.Duration) (string, time.Time
 		"typ": typ,
 		"iat": now.Unix(),
 		"exp": exp.Unix(),
+	}
+	if jti != "" {
+		claims["jti"] = jti
 	}
 	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := t.SignedString(i.secret)
@@ -120,9 +131,11 @@ func (i *Issuer) parse(raw, expectedType string) (*Claims, error) {
 		return nil, ErrWrongTokenType
 	}
 	expFloat, _ := claims["exp"].(float64)
+	jti, _ := claims["jti"].(string)
 	return &Claims{
 		UserID:    sub,
 		TokenType: typ,
+		JTI:       jti,
 		ExpiresAt: time.Unix(int64(expFloat), 0),
 	}, nil
 }
