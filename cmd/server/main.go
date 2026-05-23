@@ -40,6 +40,7 @@ func main() {
 	r := chi.NewRouter()
 	r.Get("/health", healthHandler(pool))
 	r.Post("/auth/register", usersHandler.Register)
+	r.Post("/auth/login", usersHandler.Login)
 
 	addr := ":" + cfg.Port
 	log.Printf("listening on %s", addr)

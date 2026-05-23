@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -13,6 +14,11 @@ import (
 // ErrUsernameTaken is returned when the canonical-username UNIQUE constraint
 // rejects an insert. Callers translate this into a 409 at the HTTP layer.
 var ErrUsernameTaken = errors.New("username already taken")
+
+// ErrUserNotFound is returned by lookup queries when no row matches.
+// The login handler MUST NOT propagate this distinction to clients —
+// it collapses to a generic invalid_credentials response.
+var ErrUserNotFound = errors.New("user not found")
 
 // errFriendCodeTaken is the package-internal signal for "regenerate and try
 // again." Never propagated past createUser.
@@ -52,4 +58,26 @@ func insertUser(ctx context.Context, pool *pgxpool.Pool, u *User) error {
 	}
 	u.CreatedAt = created
 	return nil
+}
+
+const getUserByCanonicalSQL = `
+SELECT id, username, username_canonical, password_hash, friend_code, created_at
+FROM users
+WHERE username_canonical = $1
+`
+
+// getUserByCanonical looks up a user by the canonical username form.
+// Returns ErrUserNotFound when no row matches.
+func getUserByCanonical(ctx context.Context, pool *pgxpool.Pool, canonical string) (*User, error) {
+	var u User
+	err := pool.QueryRow(ctx, getUserByCanonicalSQL, canonical).Scan(
+		&u.ID, &u.Username, &u.UsernameCanonical, &u.PasswordHash, &u.FriendCode, &u.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get user by canonical: %w", err)
+	}
+	return &u, nil
 }
