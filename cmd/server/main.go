@@ -53,6 +53,9 @@ func main() {
 		r.Use(issuer.RequireAuth)
 		r.Get("/me", usersHandler.Me)
 		r.Get("/friends/code", friendsHandler.MyCode)
+		r.Post("/friends/requests", friendsHandler.SendRequest)
+		r.Post("/friends/requests/{requesterID}/accept", friendsHandler.AcceptRequest)
+		r.Post("/friends/requests/{requesterID}/reject", friendsHandler.RejectRequest)
 	})
 
 	addr := ":" + cfg.Port
