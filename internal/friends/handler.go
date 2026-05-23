@@ -35,9 +35,15 @@ const (
 	errUnknownRequest        = "unknown_request"
 	errCannotActOnOwnRequest = "cannot_act_on_own_request"
 
-	// responseStateRejected is the HTTP-response state for a successful
-	// reject. It is NOT a DB state — rejection deletes the row.
-	responseStateRejected = "rejected"
+	// Remove/block/unblock error codes.
+	errNotFriends      = "not_friends"
+	errCannotBlockSelf = "cannot_block_self"
+	errNotBlocked      = "not_blocked"
+
+	// HTTP-response state strings that aren't DB states.
+	responseStateRejected  = "rejected"
+	responseStateRemoved   = "removed"
+	responseStateUnblocked = "unblocked"
 )
 
 // requestAction discriminates the two transition paths inside actOnRequest.
@@ -363,4 +369,293 @@ func (h *Handler) applyRequestAction(ctx context.Context, authedID, requesterID 
 		return nil, "", err
 	}
 	return user, newState, nil
+}
+
+// listFriendsResponse wraps the result list in an object instead of returning
+// a bare array. The wrapper lets us add metadata (count, pagination cursor,
+// "last sync at") later without breaking clients that have already adopted
+// the endpoint.
+type listFriendsResponse struct {
+	Friends []types.PublicUser `json:"friends"`
+}
+
+// List returns the authed user's accepted friends. Blocked rows are excluded
+// at the SQL layer.
+func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	authedID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	records, err := listAcceptedFriends(r.Context(), h.pool, authedID)
+	if err != nil {
+		log.Printf("friends: list: %v", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "could not list friends")
+		return
+	}
+
+	friends := make([]types.PublicUser, 0, len(records))
+	for i := range records {
+		friends = append(friends, records[i].public())
+	}
+	httpx.WriteJSON(w, http.StatusOK, listFriendsResponse{Friends: friends})
+}
+
+// listRequestsResponse splits pending requests by side so the client can
+// render the inbox (incoming) and the sent-folder (outgoing) differently.
+type listRequestsResponse struct {
+	Incoming []types.PublicUser `json:"incoming"`
+	Outgoing []types.PublicUser `json:"outgoing"`
+}
+
+// ListRequests returns pending friend requests involving the authed user,
+// split into incoming (someone else asked) and outgoing (I asked).
+func (h *Handler) ListRequests(w http.ResponseWriter, r *http.Request) {
+	authedID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	records, err := listPendingRequests(r.Context(), h.pool, authedID)
+	if err != nil {
+		log.Printf("friends: list requests: %v", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "could not list requests")
+		return
+	}
+
+	// Init to empty slices (NOT nil) so the JSON encoder writes [] rather
+	// than null for empty halves.
+	incoming := []types.PublicUser{}
+	outgoing := []types.PublicUser{}
+	for i := range records {
+		u := records[i].public()
+		if records[i].IsOutgoing {
+			outgoing = append(outgoing, u)
+		} else {
+			incoming = append(incoming, u)
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, listRequestsResponse{
+		Incoming: incoming,
+		Outgoing: outgoing,
+	})
+}
+
+// RemoveFriend deletes an accepted friendship. Either party can unfriend.
+// Pending/blocked rows are NOT a valid target — they get the same opaque
+// 404 as a missing row.
+func (h *Handler) RemoveFriend(w http.ResponseWriter, r *http.Request) {
+	authedID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	targetID := chi.URLParam(r, "userID")
+	if targetID == "" {
+		httpx.WriteError(w, http.StatusNotFound, errNotFriends)
+		return
+	}
+
+	user, actErr := h.unfriend(r.Context(), authedID, targetID)
+	if actErr != nil {
+		writeSendRequestError(w, actErr)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, sendRequestResponse{
+		User:  user.public(),
+		State: responseStateRemoved,
+	})
+}
+
+func (h *Handler) unfriend(ctx context.Context, authedID, targetID string) (*userRecord, error) {
+	userA, userB := canonicalPair(authedID, targetID)
+
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after commit
+
+	existing, err := getFriendshipForUpdate(ctx, tx, userA, userB)
+	if err != nil {
+		if errors.Is(err, ErrFriendshipNotFound) {
+			return nil, sendErr(http.StatusNotFound, errNotFriends)
+		}
+		return nil, err
+	}
+	if existing.State != StateAccepted {
+		// Pending or blocked rows are not "friendships" to remove. Opaque
+		// 404 — don't reveal whether the row is pending or blocked.
+		return nil, sendErr(http.StatusNotFound, errNotFriends)
+	}
+
+	user, err := getUserByID(ctx, tx, targetID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return nil, sendErr(http.StatusNotFound, errNotFriends)
+		}
+		return nil, err
+	}
+
+	if err := deleteFriendship(ctx, tx, userA, userB); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// Block blocks the target user. Behavior is idempotent — calling block on
+// someone already blocked is a 200 success (no error), and calling block
+// when the OTHER party has already blocked you is also a silent 200 (the
+// existing row is preserved so no-leak holds; the unblock authority stays
+// with the original blocker).
+//
+// Self-block is the one explicit failure (400 cannot_block_self) — without
+// the check, the canonical-pair (X, X) row would fail the schema CHECK and
+// surface as a confusing 500.
+func (h *Handler) Block(w http.ResponseWriter, r *http.Request) {
+	authedID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	targetID := chi.URLParam(r, "userID")
+	if targetID == "" || targetID == authedID {
+		httpx.WriteError(w, http.StatusBadRequest, errCannotBlockSelf)
+		return
+	}
+
+	user, actErr := h.blockUser(r.Context(), authedID, targetID)
+	if actErr != nil {
+		writeSendRequestError(w, actErr)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, sendRequestResponse{
+		User:  user.public(),
+		State: StateBlocked,
+	})
+}
+
+func (h *Handler) blockUser(ctx context.Context, authedID, targetID string) (*userRecord, error) {
+	userA, userB := canonicalPair(authedID, targetID)
+
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Resolve target user first. If they don't exist, fail with the same
+	// not_friends code as the unfriend path — block target validity is
+	// effectively opaque (low leak: user IDs are unguessable ULIDs).
+	user, err := getUserByID(ctx, tx, targetID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return nil, sendErr(http.StatusNotFound, errNotFriends)
+		}
+		return nil, err
+	}
+
+	existing, err := getFriendshipForUpdate(ctx, tx, userA, userB)
+	if err != nil && !errors.Is(err, ErrFriendshipNotFound) {
+		return nil, err
+	}
+
+	switch {
+	case existing == nil:
+		// No prior relationship — create a fresh blocked row.
+		if err := insertBlockedFriendship(ctx, tx, userA, userB, authedID); err != nil {
+			return nil, err
+		}
+	case existing.State == StateBlocked && existing.RequestedBy == targetID:
+		// THEY blocked ME. Leave the row alone — preserves no-leak (we
+		// don't reveal their block existed) and the unblock authority
+		// stays with the original blocker. Net effect for the caller is
+		// the same: no interaction with target. Known limitation: if the
+		// other party later unblocks, the block is effectively gone for
+		// both parties; the single-row-per-pair model has no way to
+		// represent two simultaneous blocks. Acceptable at v1 scale.
+	case existing.State == StateBlocked && existing.RequestedBy == authedID:
+		// I already blocked them — idempotent success, no-op.
+	default:
+		// accepted or pending (either direction) → convert to blocked.
+		if err := updateFriendshipBlock(ctx, tx, userA, userB, authedID); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// Unblock removes a block — but only if the authed user was the original
+// blocker. Any other case (no row, wrong state, blocked by the other party)
+// collapses to a single opaque 404 not_blocked so the existence of a block
+// placed by the OTHER party is never revealed.
+func (h *Handler) Unblock(w http.ResponseWriter, r *http.Request) {
+	authedID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	targetID := chi.URLParam(r, "userID")
+	if targetID == "" {
+		httpx.WriteError(w, http.StatusNotFound, errNotBlocked)
+		return
+	}
+
+	user, actErr := h.unblockUser(r.Context(), authedID, targetID)
+	if actErr != nil {
+		writeSendRequestError(w, actErr)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, sendRequestResponse{
+		User:  user.public(),
+		State: responseStateUnblocked,
+	})
+}
+
+func (h *Handler) unblockUser(ctx context.Context, authedID, targetID string) (*userRecord, error) {
+	userA, userB := canonicalPair(authedID, targetID)
+
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	existing, err := getFriendshipForUpdate(ctx, tx, userA, userB)
+	if err != nil {
+		if errors.Is(err, ErrFriendshipNotFound) {
+			return nil, sendErr(http.StatusNotFound, errNotBlocked)
+		}
+		return nil, err
+	}
+	// Wrong state OR I'm not the blocker → same 404. Don't distinguish:
+	// the two cases together hide whether a block exists at all.
+	if existing.State != StateBlocked || existing.RequestedBy != authedID {
+		return nil, sendErr(http.StatusNotFound, errNotBlocked)
+	}
+
+	user, err := getUserByID(ctx, tx, targetID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return nil, sendErr(http.StatusNotFound, errNotBlocked)
+		}
+		return nil, err
+	}
+
+	if err := deleteFriendship(ctx, tx, userA, userB); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return user, nil
 }

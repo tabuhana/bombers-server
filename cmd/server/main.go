@@ -52,10 +52,15 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(issuer.RequireAuth)
 		r.Get("/me", usersHandler.Me)
+		r.Get("/friends", friendsHandler.List)
 		r.Get("/friends/code", friendsHandler.MyCode)
+		r.Get("/friends/requests", friendsHandler.ListRequests)
 		r.Post("/friends/requests", friendsHandler.SendRequest)
 		r.Post("/friends/requests/{requesterID}/accept", friendsHandler.AcceptRequest)
 		r.Post("/friends/requests/{requesterID}/reject", friendsHandler.RejectRequest)
+		r.Delete("/friends/{userID}", friendsHandler.RemoveFriend)
+		r.Post("/friends/{userID}/block", friendsHandler.Block)
+		r.Post("/friends/{userID}/unblock", friendsHandler.Unblock)
 	})
 
 	addr := ":" + cfg.Port

@@ -177,3 +177,9 @@ These are settled — build to them, don't re-litigate:
 - ❌ Baking Tauri-client assumptions into the API. The API is client-agnostic.
 - ❌ Over-engineering for scale. Tens of users.
 - ❌ Heavy ORMs / magic frameworks. Keep Go boring and explicit (`net/http` + chi + sqlc/pgx).
+
+## Note about friends/blocking
+
+v1 limitation: blocks are single-row-per-pair, so a user can't independently maintain a block against someone who has blocked them — if the original blocker unblocks, no block remains. Acceptable at friends-and-family scale; future fix is a separate directional blocks table. Put it near the rooms/photos deferred-decisions area or wherever limitations best fit.
+
+Then run the end-to-end suite for remove/block/unblock and report the table: unfriend accepted (200, then 404 repeat), block from no-relationship / pending / accepted, self-block (400), block unknown user (404), double-block-by-me (200 idempotent), unblock as blocker (200), unblock when not blocker (404), unfriend non-friend (404), unauth on all three (401).

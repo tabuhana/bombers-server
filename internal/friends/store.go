@@ -185,6 +185,111 @@ func deleteFriendship(ctx context.Context, db dbExecutor, userA, userB string) e
 	return nil
 }
 
+const insertBlockedFriendshipSQL = `
+INSERT INTO friendships (user_a_id, user_b_id, state, requested_by)
+VALUES ($1, $2, 'blocked', $3)
+`
+
+func insertBlockedFriendship(ctx context.Context, db dbExecutor, userA, userB, blocker string) error {
+	if _, err := db.Exec(ctx, insertBlockedFriendshipSQL, userA, userB, blocker); err != nil {
+		return fmt.Errorf("insert blocked friendship: %w", err)
+	}
+	return nil
+}
+
+// updateFriendshipBlock overrides any prior state (accepted, pending) with
+// a fresh block by `blocker`. Used when we already know a row exists for
+// the pair but it isn't in blocked state.
+const updateFriendshipBlockSQL = `
+UPDATE friendships
+SET state = 'blocked', requested_by = $3, updated_at = NOW()
+WHERE user_a_id = $1 AND user_b_id = $2
+`
+
+func updateFriendshipBlock(ctx context.Context, db dbExecutor, userA, userB, blocker string) error {
+	if _, err := db.Exec(ctx, updateFriendshipBlockSQL, userA, userB, blocker); err != nil {
+		return fmt.Errorf("update friendship block: %w", err)
+	}
+	return nil
+}
+
+// pendingRequest extends userRecord with the side-of-the-request flag so the
+// HTTP layer can split a single result set into {incoming, outgoing}.
+type pendingRequest struct {
+	userRecord
+	IsOutgoing bool
+}
+
+// CASE expression in the JOIN resolves "the other user in the pair" — works
+// regardless of which side ($1) sits on. Without this we'd need two queries
+// (one for each side) and stitch the results in Go.
+const listAcceptedFriendsSQL = `
+SELECT u.id, u.username, u.friend_code, u.created_at
+FROM friendships f
+JOIN users u
+  ON u.id = (CASE WHEN f.user_a_id = $1 THEN f.user_b_id ELSE f.user_a_id END)
+WHERE (f.user_a_id = $1 OR f.user_b_id = $1)
+  AND f.state = 'accepted'
+ORDER BY u.username ASC
+`
+
+func listAcceptedFriends(ctx context.Context, pool *pgxpool.Pool, userID string) ([]userRecord, error) {
+	rows, err := pool.Query(ctx, listAcceptedFriendsSQL, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list accepted friends: %w", err)
+	}
+	defer rows.Close()
+
+	// Initialize empty (not nil) so an empty result marshals to [] not null.
+	out := []userRecord{}
+	for rows.Next() {
+		var u userRecord
+		if err := rows.Scan(&u.ID, &u.Username, &u.FriendCode, &u.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan friend row: %w", err)
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate friend rows: %w", err)
+	}
+	return out, nil
+}
+
+// is_outgoing is computed at the DB ("did the authed user initiate this row?")
+// so one round trip produces both halves of the {incoming, outgoing} split.
+const listPendingRequestsSQL = `
+SELECT
+  u.id, u.username, u.friend_code, u.created_at,
+  (f.requested_by = $1) AS is_outgoing
+FROM friendships f
+JOIN users u
+  ON u.id = (CASE WHEN f.user_a_id = $1 THEN f.user_b_id ELSE f.user_a_id END)
+WHERE (f.user_a_id = $1 OR f.user_b_id = $1)
+  AND f.state = 'pending'
+ORDER BY f.created_at DESC
+`
+
+func listPendingRequests(ctx context.Context, pool *pgxpool.Pool, userID string) ([]pendingRequest, error) {
+	rows, err := pool.Query(ctx, listPendingRequestsSQL, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list pending requests: %w", err)
+	}
+	defer rows.Close()
+
+	out := []pendingRequest{}
+	for rows.Next() {
+		var r pendingRequest
+		if err := rows.Scan(&r.ID, &r.Username, &r.FriendCode, &r.CreatedAt, &r.IsOutgoing); err != nil {
+			return nil, fmt.Errorf("scan request row: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate request rows: %w", err)
+	}
+	return out, nil
+}
+
 // canonicalPair returns the two user ids ordered for storage in the
 // friendships table (matches the friendships_canonical_order CHECK).
 func canonicalPair(a, b string) (string, string) {
