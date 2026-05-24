@@ -6,12 +6,16 @@ import (
 	"strings"
 )
 
-const defaultPort = "8080"
+const (
+	defaultPort               = "8080"
+	defaultCorsAllowedOrigin  = "http://localhost:1420"
+)
 
 type Config struct {
-	Port        string
-	DatabaseURL string
-	TokenSecret string
+	Port              string
+	DatabaseURL       string
+	TokenSecret       string
+	CorsAllowedOrigin string
 }
 
 func Load() (*Config, error) {
@@ -29,10 +33,16 @@ func Load() (*Config, error) {
 		port = defaultPort
 	}
 
+	corsAllowedOrigin := os.Getenv("CORS_ALLOWED_ORIGIN")
+	if corsAllowedOrigin == "" {
+		corsAllowedOrigin = defaultCorsAllowedOrigin
+	}
+
 	cfg := &Config{
-		Port:        port,
-		DatabaseURL: require("DATABASE_URL"),
-		TokenSecret: require("TOKEN_SECRET"),
+		Port:              port,
+		DatabaseURL:       require("DATABASE_URL"),
+		TokenSecret:       require("TOKEN_SECRET"),
+		CorsAllowedOrigin: corsAllowedOrigin,
 	}
 
 	if len(missing) > 0 {

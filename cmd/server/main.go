@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
@@ -44,6 +45,11 @@ func main() {
 	friendsHandler := friends.NewHandler(pool)
 
 	r := chi.NewRouter()
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins: []string{cfg.CorsAllowedOrigin},
+		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions},
+		AllowedHeaders: []string{"Authorization", "Content-Type"},
+	}))
 	r.Get("/health", healthHandler(pool))
 	r.Post("/auth/register", usersHandler.Register)
 	r.Post("/auth/login", usersHandler.Login)
