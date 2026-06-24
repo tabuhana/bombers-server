@@ -16,6 +16,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/friends"
+	"github.com/tabuhana/bombers-server/internal/profiles"
 	"github.com/tabuhana/bombers-server/internal/store"
 	"github.com/tabuhana/bombers-server/internal/users"
 )
@@ -43,11 +44,12 @@ func main() {
 	authHandler := auth.NewHandler(authService)
 	usersHandler := users.NewHandler(pool, authService)
 	friendsHandler := friends.NewHandler(pool)
+	profilesHandler := profiles.NewHandler(pool)
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{cfg.CorsAllowedOrigin},
-		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions},
+		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		AllowedHeaders: []string{"Authorization", "Content-Type"},
 	}))
 	r.Get("/health", healthHandler(pool))
@@ -67,6 +69,9 @@ func main() {
 		r.Delete("/friends/{userID}", friendsHandler.RemoveFriend)
 		r.Post("/friends/{userID}/block", friendsHandler.Block)
 		r.Post("/friends/{userID}/unblock", friendsHandler.Unblock)
+		r.Get("/me/profile", profilesHandler.GetMine)
+		r.Put("/me/profile", profilesHandler.UpdateMine)
+		r.Get("/profiles/{userID}", profilesHandler.GetForUser)
 	})
 
 	addr := ":" + cfg.Port
