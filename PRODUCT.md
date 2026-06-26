@@ -1,6 +1,6 @@
 # Bombers — Product Vision
 
-This is the master product document for **Bombers**. Read it before any architecture or code work. It describes *what we're building and why*. Technical specs (`CLAUDE.md`, `NOTES_MODULE.md`, `SERVER.md`) describe *how* — and must stay consistent with this document. If a technical decision contradicts this vision, this document wins.
+This is the master product document for **Bombers**. Read it before any architecture or code work. It describes *what we're building and why*. Technical specs (`CLAUDE.md`, `SERVER.md`) describe *how* — and must stay consistent with this document. If a technical decision contradicts this vision, this document wins.
 
 Everything in this document is **decided**. Do not re-litigate the product direction or ask the user to reconsider the social model, the sharing model, or the client/server split. Build to this.
 
@@ -94,7 +94,7 @@ This applies uniformly: shared note → friend sees your current published note;
 
 ### 1. Notebook (largely built)
 
-The Obsidian-class Markdown notebook: vault of `.md` files, CodeMirror editor, live preview, wikilinks, backlinks, graph, search, tags, templates, revision history, themes, plugins. The foundation, mostly already built. See `NOTES_MODULE.md`.
+The Obsidian-class Markdown notebook: vault of `.md` files, CodeMirror editor, live preview, wikilinks, backlinks, graph, search, tags, templates, revision history, themes, plugins. Being rebuilt from scratch as the **Editor** (a core screen in the client).
 
 ### 2. Friends
 

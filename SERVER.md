@@ -89,7 +89,7 @@ A clean way to frame it: the server is a **versioned key-value store of publishe
 - Revoking deletes the Share; the item no longer appears in the friend's pulls.
 - **Save-a-copy:** an explicit client action where the friend duplicates a shared item into their own vault as a new item (new ULID, owned by them, published to their account). Server just sees a normal new item from that user.
 - **No photo/media sharing in v1.** Photo libraries and any image sharing wait for the S3 phase (see below). The sharing contract above covers text/metadata items only for now.
-- **Note attachments are local, not server-synced yet.** Pasting an image into a note stores it as a file in the vault's `attachments/` folder and links to it (client/notes-module concern — works offline, on disk, today; see `NOTES_MODULE.md`). When such a note is published, only its **text** rides to the server in v1; syncing the referenced **image bytes** across devices is part of the S3 phase. So the sync contract does not pretend to move image binaries before then — a published note may reference an attachment that other devices can't yet pull.
+- **Note attachments are local, not server-synced yet.** Pasting an image into a note stores it as a file in the vault's `attachments/` folder and links to it (client notes concern — works offline, on disk, today). When such a note is published, only its **text** rides to the server in v1; syncing the referenced **image bytes** across devices is part of the S3 phase. So the sync contract does not pretend to move image binaries before then — a published note may reference an attachment that other devices can't yet pull.
 
 ## Real-time contract (messages, rooms, presence, indicators)
 
