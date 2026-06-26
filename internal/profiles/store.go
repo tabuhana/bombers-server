@@ -26,6 +26,7 @@ var ErrProfileNotFound = errors.New("profile not found")
 type dbExecutor interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // profileRecord is the in-memory view of a profiles row. Birthday is nullable

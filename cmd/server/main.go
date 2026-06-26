@@ -16,8 +16,11 @@ import (
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/friends"
+	"github.com/tabuhana/bombers-server/internal/messaging"
+	"github.com/tabuhana/bombers-server/internal/nodes"
 	"github.com/tabuhana/bombers-server/internal/profiles"
 	"github.com/tabuhana/bombers-server/internal/store"
+	"github.com/tabuhana/bombers-server/internal/sync"
 	"github.com/tabuhana/bombers-server/internal/users"
 )
 
@@ -45,6 +48,9 @@ func main() {
 	usersHandler := users.NewHandler(pool, authService)
 	friendsHandler := friends.NewHandler(pool)
 	profilesHandler := profiles.NewHandler(pool)
+	messagingHandler := messaging.NewHandler(pool)
+	syncHandler := sync.NewHandler(pool)
+	nodesHandler := nodes.NewHandler(pool)
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
@@ -72,6 +78,21 @@ func main() {
 		r.Get("/me/profile", profilesHandler.GetMine)
 		r.Put("/me/profile", profilesHandler.UpdateMine)
 		r.Get("/profiles/{userID}", profilesHandler.GetForUser)
+		r.Get("/me/about", profilesHandler.ListMyAbout)
+		r.Get("/me/about/{subjectID}", profilesHandler.GetMyAbout)
+		r.Put("/me/about/{subjectID}", profilesHandler.UpsertMyAbout)
+		r.Delete("/me/about/{subjectID}", profilesHandler.DeleteMyAbout)
+		r.Get("/about/{authorID}", profilesHandler.GetSharedAbout)
+		r.Post("/messages", messagingHandler.Send)
+		r.Get("/messages/{userID}", messagingHandler.History)
+		r.Post("/sync/push", syncHandler.Push)
+		r.Get("/sync/pull", syncHandler.Pull)
+		r.Get("/sync/status", syncHandler.Status)
+		// Node store (the installable-node catalog + bundles). Browse/download for
+		// any authed user; publish is owner-curated (owner-gating is a follow-up).
+		r.Get("/nodes", nodesHandler.List)
+		r.Get("/nodes/{id}/bundle", nodesHandler.Download)
+		r.Post("/nodes", nodesHandler.Publish)
 	})
 
 	addr := ":" + cfg.Port
