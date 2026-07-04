@@ -11,15 +11,23 @@
   (publish/replace, sha256-verified). Bundle bytes + metadata in a `nodes` table
   (goose migration `20260625160000_create_nodes.sql`). Full protocol: client
   `docs/NODE_INSTALL.md`.
+- [x] **Docs carve-out** — `SERVER.md` (Node store section + decision #9) and
+  `CLAUDE.md` (nodes in the Built list, routes, migrations) now record that node
+  bundles are Postgres `bytea` (the app's own *code* distribution), distinct from
+  the v1 "no user media/blob" rule. The client↔server node endpoints are also now
+  in the client's `docs/API.md` (§9).
+- [x] **Client node builder** — the desktop builder that produces nodes for `POST
+  /nodes` (and local installs) is built (client Phase 4.1–4.3). The server side it
+  feeds is unchanged.
 
 ## Server-relevant TODO (from the master roadmap)
 
 - [ ] **Owner-gating on `POST /nodes`** — publishing is open to any authed user now;
   restrict to owner/curated.
-- [ ] **Docs carve-out** — record that node bundles are stored as Postgres `bytea`
-  (the app's own *code* distribution), distinct from the v1 "no user media/blob"
-  rule (photos/S3). Update `SERVER.md` + `CLAUDE.md` (and add the `nodes` domain to
-  CLAUDE.md's "Built" section).
+- [ ] **Server-side permission re-derivation on publish** — the client auto-detects a
+  node's permissions from its code, but the server stores them as-sent; re-derive /
+  validate server-side so a published node can't over-declare. (Static `host.*` scan,
+  mirroring the client's `core/nodes/permissions.ts`.)
 - [ ] **Sharing** (`internal/sharing`) — let a client pull items friends shared with
   it (unbuilt; today sync pull is own-items only).
 - [ ] **Real-time** (`internal/realtime`, WebSocket) — the "feels live" sync nudge +

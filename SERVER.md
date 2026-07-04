@@ -9,6 +9,7 @@ This document defines the server's *shape, contracts, and decisions*. Detailed e
 - **Accounts & auth** — registration, login, sessions/tokens.
 - **Friends** — friend codes, friend requests, the friend graph.
 - **Published content** — server-side copies of users' published notes (and later mood/habits/events), used for cross-device restore and as the substrate for sharing.
+- **Node store** — the catalog of installable **nodes** (the deck's buildable units): list metadata, serve a node's `node.js` bundle, and accept publishes. Built; see "Node store" below.
 - **Sharing & permissions** — who can see what; granting/revoking friend access to specific published content.
 - **Profiles** — the two-sided profile-card system (facts you keep about friends; facts they publish about themselves with visibility rules).
 - **Messaging** — real-time DMs.
@@ -101,6 +102,19 @@ Over WebSocket:
 - **Presence:** which friends are online (for the in-app indicators / room invites).
 - **Indicators:** server pushes lightweight "you have something new" signals (a new message, an event invite, a friend's shared update) so the client can show ambient badges. No OS notifications — the client decides how to surface them, quietly.
 
+## Node store (catalog / bundle / publish) — built
+
+Nodes are the installable, user-buildable unit on the client (the deck items). The server hosts the **node store** so a client can browse, download, and publish them. Implemented in `internal/nodes` (`handler.go` / `store.go`), table `nodes`.
+
+- **A published node = metadata + a bundle.** Metadata is small catalog fields (id, name, version, description, author, width, height, can_rotate, permissions, hash). The bundle is the `node.js` ESM (a node factory) the client dynamic-imports and runs.
+- **Endpoints** (all under the authed group):
+  - `GET /nodes` — catalog metadata for every published node (no bundle bytes), ordered by name.
+  - `GET /nodes/{id}/bundle` — the `node.js` bytes; integrity hash in the `ETag` header. The client re-hashes on install and refuses a mismatch.
+  - `POST /nodes` — publish (or replace) a node + bundle. Body: the metadata fields + base64 `bundle`. The server computes the bundle's sha256, **rejects a supplied `hash` that doesn't match**, and stores the computed hash. Body cap 4 MiB.
+- **Permissions** are stored as the client sends them. The client auto-detects them from the node's `host.*` usage (a static scan in the builder); the server **re-deriving/validating** them on publish is a planned hardening — today it trusts the client list.
+- **Curated, not open.** Publishing requires auth; **owner-only gating is a follow-up** (any authenticated user can publish today). This matches the "curated now, community later" trust model — untrusted-code publishing is the future case that needs a real review/sandbox gate.
+- **Bundle storage is a deliberate carve-out from "no media/blob in v1."** A node bundle is a tiny JS file (kilobytes) stored as Postgres `bytea` — the same "small text/code in Postgres" reasoning as note bodies. This is **not** the heavy-media (photos, attachments, room files) the S3 phase covers; the no-blob-in-v1 rule is about user media, not code bundles.
+
 ## API surface (to be detailed during planning)
 
 The contract will be split into HTTP (request/response) and WebSocket (real-time). Rough groupings:
@@ -109,6 +123,7 @@ The contract will be split into HTTP (request/response) and WebSocket (real-time
 - Auth: register, login, refresh, logout.
 - Friends: get my friend code, send friend request (by code), list/accept/reject requests, list friends, remove/block.
 - Sync: push published items, pull items (mine + shared-with-me), report last-synced.
+- Nodes: list catalog, download a node bundle, publish a node. **(Built — see "Node store".)**
 - Sharing: grant share, revoke share, list shares.
 - Profiles: CRUD about-cards, CRUD self-cards + visibility, fetch a friend's profile (resolves what they've made visible to me).
 - Events: create, invite, accept/decline, list my calendar.
@@ -132,6 +147,7 @@ bombers-server/
 │   ├── users/                 accounts, friend codes
 │   ├── friends/               friend graph, requests
 │   ├── sync/                  publish/pull, versioning, conflicts
+│   ├── nodes/                 node store: catalog, bundle download, publish
 │   ├── sharing/               shares, permission checks
 │   ├── profiles/              about-cards + self-cards + visibility
 │   ├── events/                events + invites
@@ -158,6 +174,7 @@ These are settled — build to them, don't re-litigate:
 6. **Profile-card shape:** structured base fields (name, birthday, country, time zone; **age derived from birthday, not stored**) + freeform text. (See data model.)
 7. **No v1 media:** photo pass-through dropped entirely. All heavy media (photos, DM images, room files) deferred to a single **S3 / blob-storage phase**. Note image-paste is local-vault-only until then.
 8. **Rate limiting:** standard **floor** — enough to keep the server from being knocked over (token-bucket on auth endpoints to stop brute-force; looser limits elsewhere). Not precision-tuned; friends-and-family scale.
+9. **Node store:** node bundles (small `node.js` files) live in **Postgres `bytea`** — a deliberate carve-out from the no-blob-in-v1 rule (that rule is about heavy *user media*, not code bundles). Publishing is auth-gated and **curated**; owner-only gating + server-side permission re-derivation are follow-ups. (See "Node store".)
 
 ## Decisions still open (to resolve before/while writing Go)
 
