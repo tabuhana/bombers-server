@@ -1,17 +1,18 @@
-// Package nodes serves the node store: catalog metadata, bundle downloads, and
-// publishing. Nodes are the installable unit — a client lists the catalog,
-// downloads a bundle, verifies its hash, and runs it. Curated in v1: publishing
-// requires auth (owner-only gating is a follow-up), browsing/downloading are for
-// any authenticated user.
+// Package nodes serves the OFFICIAL NODE STORE: this server's operator-
+// published nodes in the SDK {manifest, files} format (the same opaque-bundle
+// shape nodeshare's friend transfers carry). Any authenticated user browses
+// the catalog and downloads bundles to install; PUBLISHING is operator-only
+// via the server console (internal/console `publish`/`unpublish`) — there is
+// deliberately no HTTP publish endpoint, and no admin role yet (deferred).
+// Each server's store is its own island: a self-hosted server's operator
+// curates their own catalog with the same commands.
 package nodes
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -20,92 +21,66 @@ import (
 	"github.com/tabuhana/bombers-server/internal/httpx"
 )
 
-// Cap on a published node bundle. Node bundles are small JS files; 4 MiB is
-// generous and keeps a bad upload from exhausting memory.
-const publishBodyLimit = 4 << 20
+const errNodeNotFound = "node_not_found"
 
 type Handler struct {
-	store *Store
+	pool *pgxpool.Pool
 }
 
 func NewHandler(pool *pgxpool.Pool) *Handler {
-	return &Handler{store: NewStore(pool)}
+	return &Handler{pool: pool}
 }
 
-// List → GET /nodes : catalog metadata for every published node.
+// catalogResponse is the wire shape of one store listing — light manifest
+// fields only, never the files.
+type catalogResponse struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Version     string    `json:"version"`
+	Icon        string    `json:"icon"`
+	Description string    `json:"description"`
+	Tags        []string  `json:"tags"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// List → GET /nodes : the store catalog. An empty store is a 200 with an
+// empty list.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	items, err := h.store.List(r.Context())
+	entries, err := Catalog(r.Context(), h.pool)
 	if err != nil {
+		log.Printf("nodes: catalog: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to list nodes")
 		return
 	}
-	if items == nil {
-		items = []Node{}
+	out := make([]catalogResponse, len(entries))
+	for i, e := range entries {
+		out[i] = catalogResponse{
+			ID:          e.ID,
+			Name:        e.Name,
+			Version:     e.Version,
+			Icon:        e.Icon,
+			Description: e.Description,
+			Tags:        e.Tags,
+			UpdatedAt:   e.UpdatedAt,
+		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, items)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"nodes": out})
 }
 
-// Download → GET /nodes/{id}/bundle : the node.js ESM bytes (hash in the ETag).
+// Download → GET /nodes/{id}/bundle : the full {manifest, files} JSON for
+// install. (The /bundle suffix keeps this route clear of nodeshare's static
+// /nodes/received.)
 func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	bundle, hash, err := h.store.Bundle(r.Context(), id)
+	bundle, err := Bundle(r.Context(), h.pool, id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		httpx.WriteError(w, http.StatusNotFound, "unknown node")
+		httpx.WriteError(w, http.StatusNotFound, errNodeNotFound)
 		return
 	}
 	if err != nil {
+		log.Printf("nodes: bundle %s: %v", id, err)
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to read bundle")
 		return
 	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("ETag", `"`+hash+`"`)
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(bundle)
-}
-
-// publishRequest is the JSON body for POST /nodes: the manifest fields plus the
-// base64-encoded node.js bundle.
-type publishRequest struct {
-	Node
-	Bundle string `json:"bundle"`
-}
-
-// Publish → POST /nodes : publish (or replace) a node + bundle. Computes the
-// bundle's sha256 and rejects a mismatched `hash` if one was supplied, then stores
-// the computed hash so downloads can be integrity-checked.
-func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, publishBodyLimit)
-
-	var req publishRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid body")
-		return
-	}
-
-	bundle, err := base64.StdEncoding.DecodeString(req.Bundle)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "bundle is not valid base64")
-		return
-	}
-	if req.ID == "" || req.Name == "" || req.Version == "" || len(bundle) == 0 {
-		httpx.WriteError(w, http.StatusBadRequest, "id, name, version and bundle are required")
-		return
-	}
-
-	sum := sha256.Sum256(bundle)
-	computed := "sha256-" + hex.EncodeToString(sum[:])
-	if req.Hash != "" && req.Hash != computed {
-		httpx.WriteError(w, http.StatusBadRequest, "hash does not match bundle")
-		return
-	}
-	req.Hash = computed
-	if req.Permissions == nil {
-		req.Permissions = []string{}
-	}
-
-	if err := h.store.Upsert(r.Context(), req.Node, bundle); err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "failed to publish node")
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": req.ID, "hash": computed})
+	httpx.WriteJSON(w, http.StatusOK, bundle)
 }

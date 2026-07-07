@@ -2,78 +2,159 @@ package nodes
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Node is the catalog metadata for a published node (no bundle bytes). The JSON
-// tags are the wire shape the client reads from GET /nodes.
-type Node struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Description string   `json:"description"`
-	Author      string   `json:"author"`
-	Width       int      `json:"width"`
-	Height      int      `json:"height"`
-	CanRotate   bool     `json:"canRotate"`
-	Permissions []string `json:"permissions"`
-	Hash        string   `json:"hash"`
+// BundleLimit caps a published store bundle — node sources are small text
+// files; 4 MiB is generous (same ceiling as nodeshare's friend transfers).
+const BundleLimit = 4 << 20
+
+// dbExecutor is the subset of pgx methods the queries need; both *pgxpool.Pool
+// and pgx.Tx satisfy it.
+type dbExecutor interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-type Store struct {
-	pool *pgxpool.Pool
+// CatalogEntry is one store listing: the denormalized columns plus the light
+// display fields pulled out of the bundle's manifest at read time (icon,
+// description, optional tags) — never the heavy files.
+type CatalogEntry struct {
+	ID          string
+	Name        string
+	Version     string
+	Icon        string
+	Description string
+	Tags        []string
+	UpdatedAt   time.Time
 }
 
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+// BundleInfo is what publishing extracts from a {manifest, files} bundle for
+// the denormalized listing columns.
+type BundleInfo struct {
+	ID      string
+	Name    string
+	Version string
 }
 
-// List returns catalog metadata for every published node, ordered by name.
-func (s *Store) List(ctx context.Context) ([]Node, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, name, version, description, author, width, height, can_rotate, permissions, hash
-		FROM nodes ORDER BY name`)
+// parseBundle validates a raw bundle: valid JSON, a manifest object with a
+// non-empty id + name, and at least one string-valued file. Everything else
+// inside the bundle stays opaque — the client owns the manifest shape.
+func parseBundle(raw []byte) (BundleInfo, error) {
+	if len(raw) == 0 {
+		return BundleInfo{}, errors.New("bundle is empty")
+	}
+	if len(raw) > BundleLimit {
+		return BundleInfo{}, fmt.Errorf("bundle is %d bytes — the cap is %d", len(raw), BundleLimit)
+	}
+	var b struct {
+		Manifest struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"manifest"`
+		Files map[string]string `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return BundleInfo{}, fmt.Errorf("not a valid {manifest, files} JSON bundle: %w", err)
+	}
+	id := strings.TrimSpace(b.Manifest.ID)
+	name := strings.TrimSpace(b.Manifest.Name)
+	if id == "" || name == "" {
+		return BundleInfo{}, errors.New("bundle manifest needs a non-empty id and name")
+	}
+	if len(b.Files) == 0 {
+		return BundleInfo{}, errors.New("bundle has no files (or file contents aren't strings)")
+	}
+	return BundleInfo{ID: id, Name: name, Version: strings.TrimSpace(b.Manifest.Version)}, nil
+}
+
+// catalogSQL lists every published node, light fields only. icon/description/
+// tags live inside the manifest; missing ones coalesce to empty so old or
+// minimal manifests still list cleanly.
+const catalogSQL = `
+SELECT id, name, version,
+       COALESCE(bundle->'manifest'->>'icon', ''),
+       COALESCE(bundle->'manifest'->>'description', ''),
+       COALESCE(bundle->'manifest'->'tags', '[]'::jsonb),
+       updated_at
+FROM nodes
+ORDER BY name
+`
+
+// Catalog returns every published node's listing metadata, ordered by name.
+func Catalog(ctx context.Context, db dbExecutor) ([]CatalogEntry, error) {
+	rows, err := db.Query(ctx, catalogSQL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list catalog: %w", err)
 	}
 	defer rows.Close()
 
-	var out []Node
+	var out []CatalogEntry
 	for rows.Next() {
-		var n Node
-		if err := rows.Scan(&n.ID, &n.Name, &n.Version, &n.Description, &n.Author,
-			&n.Width, &n.Height, &n.CanRotate, &n.Permissions, &n.Hash); err != nil {
-			return nil, err
+		var e CatalogEntry
+		var rawTags json.RawMessage
+		if err := rows.Scan(&e.ID, &e.Name, &e.Version, &e.Icon, &e.Description, &rawTags, &e.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan catalog entry: %w", err)
 		}
-		out = append(out, n)
+		// Tags are an optional manifest nicety — a malformed value just means
+		// no tags, never a failed listing.
+		if err := json.Unmarshal(rawTags, &e.Tags); err != nil || e.Tags == nil {
+			e.Tags = []string{}
+		}
+		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate catalog: %w", err)
+	}
+	return out, nil
 }
 
-// Bundle returns the node.js bytes and its hash for a node id, or pgx.ErrNoRows.
-func (s *Store) Bundle(ctx context.Context, id string) ([]byte, string, error) {
-	var bundle []byte
-	var hash string
-	err := s.pool.QueryRow(ctx, `SELECT bundle, hash FROM nodes WHERE id = $1`, id).Scan(&bundle, &hash)
+// Bundle returns the full {manifest, files} JSON for one node, or
+// pgx.ErrNoRows for an unknown id.
+func Bundle(ctx context.Context, db dbExecutor, id string) (json.RawMessage, error) {
+	var bundle json.RawMessage
+	if err := db.QueryRow(ctx, `SELECT bundle FROM nodes WHERE id = $1`, id).Scan(&bundle); err != nil {
+		return nil, err
+	}
+	return bundle, nil
+}
+
+const upsertSQL = `
+INSERT INTO nodes (id, name, version, bundle, updated_at)
+VALUES ($1, $2, $3, $4, now())
+ON CONFLICT (id) DO UPDATE SET
+  name = EXCLUDED.name, version = EXCLUDED.version,
+  bundle = EXCLUDED.bundle, updated_at = now()
+`
+
+// PublishBundle validates a raw {manifest, files} bundle and publishes (or
+// replaces) it in the store, keyed by its manifest id. This is the console's
+// operator-publish path — there is deliberately no HTTP publish endpoint.
+func PublishBundle(ctx context.Context, db dbExecutor, raw []byte) (BundleInfo, error) {
+	info, err := parseBundle(raw)
 	if err != nil {
-		return nil, "", err
+		return BundleInfo{}, err
 	}
-	return bundle, hash, nil
+	if _, err := db.Exec(ctx, upsertSQL, info.ID, info.Name, info.Version, raw); err != nil {
+		return BundleInfo{}, fmt.Errorf("publish %s: %w", info.ID, err)
+	}
+	return info, nil
 }
 
-// Upsert publishes (or replaces) a node and its bundle.
-func (s *Store) Upsert(ctx context.Context, n Node, bundle []byte) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO nodes
-			(id, name, version, description, author, width, height, can_rotate, permissions, hash, bundle, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
-		ON CONFLICT (id) DO UPDATE SET
-			name = EXCLUDED.name, version = EXCLUDED.version, description = EXCLUDED.description,
-			author = EXCLUDED.author, width = EXCLUDED.width, height = EXCLUDED.height,
-			can_rotate = EXCLUDED.can_rotate, permissions = EXCLUDED.permissions,
-			hash = EXCLUDED.hash, bundle = EXCLUDED.bundle, updated_at = now()`,
-		n.ID, n.Name, n.Version, n.Description, n.Author, n.Width, n.Height,
-		n.CanRotate, n.Permissions, n.Hash, bundle)
-	return err
+// Unpublish removes a node from the store. Reports whether it existed.
+func Unpublish(ctx context.Context, db dbExecutor, id string) (bool, error) {
+	tag, err := db.Exec(ctx, `DELETE FROM nodes WHERE id = $1`, id)
+	if err != nil {
+		return false, fmt.Errorf("unpublish %s: %w", id, err)
+	}
+	return tag.RowsAffected() > 0, nil
 }

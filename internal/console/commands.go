@@ -2,18 +2,28 @@ package console
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/tabuhana/bombers-server/internal/nodes"
 )
 
-// The starter command set: read-only introspection plus stop. Anything that
-// mutates (delete user, promote admin) waits for the admin-role follow-up.
+// The command set: read-only introspection, stop, and the NODE STORE's
+// operator-publish surface (publish/unpublish/store) — the console IS the
+// store's admin path, a deliberate step past read-only (there is no HTTP
+// publish endpoint and no admin role yet). Anything else that mutates
+// (delete user, promote admin) still waits for the admin-role follow-up.
 func builtins() []command {
 	return []command{
 		{name: "help", help: "list available commands", run: runHelp},
 		{name: "users", help: "list registered users (username, id, created)", run: runUsers},
 		{name: "status", help: "uptime, DB ping, and row counts", run: runStatus},
+		{name: "store", help: "list store-published nodes (id, name, version)", run: runStore},
+		{name: "publish", help: "publish <path> — put a {manifest, files} JSON bundle in the node store", run: runPublish},
+		{name: "unpublish", help: "unpublish <id> — remove a node from the store", run: runUnpublish},
 		{name: "stop", aliases: []string{"quit", "exit"}, help: "gracefully shut the server down", run: runStop},
 	}
 }
@@ -76,6 +86,60 @@ func runStatus(ctx context.Context, c *Console, _ []string) error {
 		}
 		fmt.Fprintf(c.out, "  %-22s %d\n", q.label+":", n)
 	}
+	return nil
+}
+
+func runStore(ctx context.Context, c *Console, _ []string) error {
+	entries, err := nodes.Catalog(ctx, c.pool)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		version := e.Version
+		if version == "" {
+			version = "-"
+		}
+		fmt.Fprintf(c.out, "  %-28s %-32s v%s\n", e.ID, e.Name, version)
+	}
+	fmt.Fprintf(c.out, "%d node(s) published\n", len(entries))
+	return nil
+}
+
+func runPublish(ctx context.Context, c *Console, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: publish <path-to-bundle.json>  (a {manifest, files} JSON file)")
+	}
+	// Join so a path with spaces works without quoting.
+	path := strings.Join(args, " ")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read bundle: %w", err)
+	}
+	info, err := nodes.PublishBundle(ctx, c.pool, raw)
+	if err != nil {
+		return err
+	}
+	version := info.Version
+	if version == "" {
+		version = "-"
+	}
+	fmt.Fprintf(c.out, "published %s (%s) v%s\n", info.ID, info.Name, version)
+	return nil
+}
+
+func runUnpublish(ctx context.Context, c *Console, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: unpublish <node-id>")
+	}
+	removed, err := nodes.Unpublish(ctx, c.pool, args[0])
+	if err != nil {
+		return err
+	}
+	if !removed {
+		fmt.Fprintf(c.out, "no node %q in the store\n", args[0])
+		return nil
+	}
+	fmt.Fprintf(c.out, "unpublished %s\n", args[0])
 	return nil
 }
 

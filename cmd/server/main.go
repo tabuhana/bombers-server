@@ -99,11 +99,10 @@ func main() {
 		r.Post("/sync/push", syncHandler.Push)
 		r.Get("/sync/pull", syncHandler.Pull)
 		r.Get("/sync/status", syncHandler.Status)
-		// Node store (the installable-node catalog + bundles). Browse/download for
-		// any authed user; publish is owner-curated (owner-gating is a follow-up).
+		// The official node store: operator-published SDK bundles. Any authed
+		// user browses + installs; publishing is console-only (no HTTP publish).
 		r.Get("/nodes", nodesHandler.List)
 		r.Get("/nodes/{id}/bundle", nodesHandler.Download)
-		r.Post("/nodes", nodesHandler.Publish)
 		// Friend node-sharing (the clone model): a one-way transfer inbox,
 		// friend-gated — separate from the public node-store catalog above.
 		r.Post("/nodes/send", nodeshareHandler.Send)

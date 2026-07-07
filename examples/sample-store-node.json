@@ -1,0 +1,18 @@
+{
+  "manifest": {
+    "id": "hello-note",
+    "name": "Hello Note",
+    "version": "1.0.0",
+    "size": { "w": 2, "h": 2 },
+    "canRotate": false,
+    "modalSize": "mini",
+    "description": "A tiny store-published sample — a friendly note on your deck.",
+    "icon": "StickyNote",
+    "tags": ["sample", "fun"],
+    "entry": "node.js"
+  },
+  "files": {
+    "tile.jsx": "// tile.jsx — Hello Note's face on the deck (2×2 cells).\nimport { Stack, Text } from 'bombers/ui';\n\nexport function tile({ state }) {\n  const [note] = state('note', 'hello from the store!', { persist: true });\n\n  return (\n    <Stack align=\"center\" justify=\"center\" gap={4} style={{ width: '100%', height: '100%' }}>\n      <Text size={15}>{note}</Text>\n      <Text variant=\"faint\">tap to change</Text>\n    </Stack>\n  );\n}\n",
+    "modal.jsx": "// modal.jsx — pick what the tile says (shares the 'note' state key).\nimport { Button, Stack, Text } from 'bombers/ui';\n\nconst NOTES = [\n  'hello from the store!',\n  'have a lovely day',\n  'drink some water',\n  'you got this',\n];\n\nexport function modal({ state }) {\n  const [note, setNote] = state('note', 'hello from the store!', { persist: true });\n\n  return (\n    <Stack gap={12}>\n      <Text variant=\"muted\">Pick what the tile says:</Text>\n      <Stack gap={6}>\n        {NOTES.map((n) => (\n          <Button key={n} variant={n === note ? 'primary' : undefined} onClick={() => setNote(n)}>\n            {n}\n          </Button>\n        ))}\n      </Stack>\n    </Stack>\n  );\n}\n"
+  }
+}
