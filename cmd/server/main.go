@@ -18,6 +18,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/friends"
 	"github.com/tabuhana/bombers-server/internal/messaging"
 	"github.com/tabuhana/bombers-server/internal/nodes"
+	"github.com/tabuhana/bombers-server/internal/nodeshare"
 	"github.com/tabuhana/bombers-server/internal/profiles"
 	"github.com/tabuhana/bombers-server/internal/store"
 	"github.com/tabuhana/bombers-server/internal/sync"
@@ -51,6 +52,7 @@ func main() {
 	messagingHandler := messaging.NewHandler(pool)
 	syncHandler := sync.NewHandler(pool)
 	nodesHandler := nodes.NewHandler(pool)
+	nodeshareHandler := nodeshare.NewHandler(pool)
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
@@ -93,6 +95,11 @@ func main() {
 		r.Get("/nodes", nodesHandler.List)
 		r.Get("/nodes/{id}/bundle", nodesHandler.Download)
 		r.Post("/nodes", nodesHandler.Publish)
+		// Friend node-sharing (the clone model): a one-way transfer inbox,
+		// friend-gated — separate from the public node-store catalog above.
+		r.Post("/nodes/send", nodeshareHandler.Send)
+		r.Get("/nodes/received", nodeshareHandler.ListReceived)
+		r.Delete("/nodes/received/{id}", nodeshareHandler.Dismiss)
 	})
 
 	addr := ":" + cfg.Port
