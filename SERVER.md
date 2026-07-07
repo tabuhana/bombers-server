@@ -21,10 +21,38 @@ This document defines the server's *shape, contracts, and decisions*. Detailed e
 ## What the server is NOT
 
 - Not authoritative over a user's *working* copy. Local client is the editing source of truth; the server holds the *published* copy.
-- Not a federation hub. One official server; private self-hosted servers are isolated and unsupported (see `PRODUCT.md`).
+- Not a federation hub. Self-hosting is supported (§Self-hosting / Running below), but every server — official or private — is an isolated island: no cross-server friends, sharing, or messaging (see `PRODUCT.md`).
 - Not a media/blob host **in v1** — no photo pass-through, no image storage of any kind. All heavy media (photo libraries, DM image attachments, room files) waits for a single later **S3 / blob-storage phase**. Until then the server handles text and metadata only.
 - Not coupled to the Tauri client specifically. The API is the product; the client is one consumer. Other (out-of-scope) consumers may exist, so keep the API clean and client-agnostic.
 - Not built for massive scale. Tens of users. Don't over-engineer.
+
+## Self-hosting / Running
+
+Self-hosting is first-class: run the same binary the official server runs, point the client at it from the login screen's server picker, and you have your own island (no federation — see above).
+
+**Requirements:** a PostgreSQL database and the Go binary (`go build ./cmd/server` or `go run ./cmd/server`). Apply migrations with goose (`goose -dir migrations postgres $DATABASE_URL up`).
+
+**Environment variables** (a `.env` in the working directory is loaded automatically):
+
+| Var | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `DATABASE_URL` | yes | — | Postgres connection string |
+| `TOKEN_SECRET` | yes | — | HS256 signing secret for access tokens (generate a long random one) |
+| `PORT` | no | `8080` | HTTP listen port |
+| `CORS_ALLOWED_ORIGIN` | no | `http://localhost:1420` | The **client's** origin (one value). See below. |
+
+**CORS:** a self-hoster must set `CORS_ALLOWED_ORIGIN` to the origin their client webview runs on, or every browser-side call is blocked. The packaged Tauri app's origin is `http://tauri.localhost` on Windows (`tauri://localhost` on macOS); the dev client is `http://localhost:1420` (the default).
+
+**Running:** by default the binary opens an interactive **admin console** on stdin (Minecraft-style):
+
+```
+bombers> help     # list commands
+bombers> users    # registered users (username, id, created)
+bombers> status   # uptime, DB ping, row counts
+bombers> stop     # graceful shutdown (aliases: quit, exit)
+```
+
+The console is local-operator-privileged (whoever holds the terminal is the op — no auth). For daemons/service managers, `--headless` skips the console and the process serves until SIGINT/SIGTERM (a non-TTY stdin or console EOF falls back to the same). Destructive admin commands (delete user, promote admin) are a deliberate later follow-up.
 
 ## Tech stack (proposed — confirm during planning)
 

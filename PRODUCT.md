@@ -39,16 +39,15 @@ The server does the heavy lifting for anything multi-user. The client never talk
 
 ## The official server vs. self-hosting
 
-There is **one official Bombers server**, hosted by the project owner on a VPS. By default the client connects to it. Accounts are tied to the official server.
+There is **one official Bombers server**, hosted by the project owner on a VPS. By default the client connects to it.
 
-The code is open enough that someone *could* self-host their own private server, but:
+**Self-hosting is supported and first-class.** Anyone can run the server binary as their own private server, and the client picks which server to talk to on the login screen (defaulting to official). See `SERVER.md` §Self-hosting / Running for how. But every server — official or private — is a **fully disconnected island**:
 
-- This is **not** an advertised or supported feature. Don't build onboarding, UI, or docs around it.
-- Private servers are **fully disconnected islands.** No federation. No cross-server friends, sharing, or messaging. A private server shares nothing with the official one.
-- If a user wants to move from the official server to their own, they migrate their data themselves. The project does not manage, assist, or care about that migration.
+- **No federation. No cross-server anything.** No cross-server friends, sharing, or messaging. Accounts, friend codes, and content exist only on the server that created them; a session/token from one server means nothing to another.
+- Moving between servers means registering fresh on the new one. The project does not migrate accounts or content between servers.
 - There will be **other ways to connect to the server that are outside this project's scope.** Therefore the server must treat its API as the product and this client as just one consumer — never bake client-specific assumptions into the server.
 
-For all build purposes: assume the official single server. Don't over-engineer for federation or multi-server scenarios.
+For all build purposes: design for ONE server (one binary, one Postgres, one circle of users). "Multi-server" only ever means separate islands running the same code — don't over-engineer for federation or cross-server scenarios.
 
 ## Mental model: local working copy + server published copy
 
@@ -218,7 +217,7 @@ Still **the owner's personal app + a few friends onboarded manually.** Not a pub
 - ❌ Making the server authoritative over your *working* copy. Local is where you edit; server is the published mirror. Don't invert this.
 - ❌ Auto-sharing anything. Sharing is always explicit and per-friend.
 - ❌ Public discovery, username search, friend suggestions. Friend codes only.
-- ❌ Federation / cross-server anything. One official server; private servers are isolated islands.
+- ❌ Federation / cross-server anything. Every server — official or self-hosted — is an isolated island.
 - ❌ A global plugin marketplace or hosted plugins. Local/peer only.
 - ❌ Persisting rooms after expiry. Ephemeral by design.
 - ❌ OS-level notification spam. In-app ambient indicators only.
