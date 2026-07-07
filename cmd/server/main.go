@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +19,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/config"
+	"github.com/tabuhana/bombers-server/internal/console"
 	"github.com/tabuhana/bombers-server/internal/friends"
 	"github.com/tabuhana/bombers-server/internal/messaging"
 	"github.com/tabuhana/bombers-server/internal/nodes"
@@ -26,6 +31,10 @@ import (
 )
 
 func main() {
+	headless := flag.Bool("headless", false,
+		"serve without the interactive admin console (stop with SIGINT/SIGTERM)")
+	flag.Parse()
+
 	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		log.Fatalf("loading .env: %v", err)
 	}
@@ -102,11 +111,42 @@ func main() {
 		r.Delete("/nodes/received/{id}", nodeshareHandler.Dismiss)
 	})
 
-	addr := ":" + cfg.Port
-	log.Printf("listening on %s", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
-		log.Fatal(err)
+	startedAt := time.Now()
+	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
+	go func() {
+		log.Printf("listening on %s", srv.Addr)
+		// A serve error at startup (e.g. port in use) is fatal in both modes;
+		// ErrServerClosed is the normal graceful-shutdown exit.
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("http server: %v", err)
+		}
+	}()
+
+	// DEFAULT: the interactive operator console (Minecraft-style) on stdin.
+	// --headless skips it, and so does a non-TTY stdin (service managers,
+	// `< /dev/null`) — those wait for SIGINT/SIGTERM like a normal daemon. A
+	// console that hits EOF also falls back to signal-waiting rather than
+	// exiting or spinning.
+	stopped := false
+	if !*headless && console.Interactive(os.Stdin) {
+		stopped = console.New(pool, startedAt).Run()
+		if !stopped {
+			log.Printf("console input ended; running headless (SIGINT/SIGTERM to stop)")
+		}
 	}
+	if !stopped {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		s := <-sig
+		log.Printf("received %s, shutting down", s)
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("graceful shutdown: %v", err)
+	}
+	log.Printf("server stopped")
 }
 
 func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {
