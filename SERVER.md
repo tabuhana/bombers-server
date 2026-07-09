@@ -15,14 +15,15 @@ This document defines the server's *shape, contracts, and decisions*. Detailed e
 - **Messaging** — real-time DMs.
 - **Rooms** — ephemeral real-time spaces, expiring when empty. v1: chat + presence. Deliberately open-ended for later (files, shared editing, games, etc.).
 - **Notification fan-out** — feeding the client's in-app ambient indicators (no OS push).
+- **Profile media** — avatar + banner images for the Discord-style profile card, in S3-compatible object storage, served as an authenticated pass-through. Built; see "Profile media" below. This is the **first slice of the S3 phase**.
 
-*(Photos/memories and any other heavy media are NOT a v1 server responsibility — they're deferred to a single later S3 / blob-storage phase; see the decisions sections. There is no photo pass-through.)*
+*(Photo libraries/memories, DM image attachments, note-attachment sync, and room files are still deferred — they're later slices of the same S3 phase. The object-storage plumbing they'll ride on now exists.)*
 
 ## What the server is NOT
 
 - Not authoritative over a user's *working* copy. Local client is the editing source of truth; the server holds the *published* copy.
 - Not a federation hub. Self-hosting is supported (§Self-hosting / Running below), but every server — official or private — is an isolated island: no cross-server friends, sharing, or messaging (see `PRODUCT.md`).
-- Not a media/blob host **in v1** — no photo pass-through, no image storage of any kind. All heavy media (photo libraries, DM image attachments, room files) waits for a single later **S3 / blob-storage phase**. Until then the server handles text and metadata only.
+- Not a general media/blob host **yet**. The S3 phase has begun — **profile media (avatar/banner) is built** — but the heavier media (photo libraries, DM image attachments, note-attachment sync, room files) still waits for its later slices. Don't build those piecemeal; each gets designed when picked up.
 - Not coupled to the Tauri client specifically. The API is the product; the client is one consumer. Other (out-of-scope) consumers may exist, so keep the API clean and client-agnostic.
 - Not built for massive scale. Tens of users. Don't over-engineer.
 
@@ -38,8 +39,15 @@ Self-hosting is first-class: run the same binary the official server runs, point
 | --- | --- | --- | --- |
 | `DATABASE_URL` | yes | — | Postgres connection string |
 | `TOKEN_SECRET` | yes | — | HS256 signing secret for access tokens (generate a long random one) |
+| `S3_ACCESS_KEY` | yes | — | Object-storage access key (MinIO root user locally) |
+| `S3_SECRET_KEY` | yes | — | Object-storage secret key (MinIO root password locally) |
+| `S3_ENDPOINT` | no | `localhost:9000` | S3-compatible endpoint, `host:port` without scheme |
+| `S3_BUCKET` | no | `bombers-media` | Bucket for profile media (created on startup if missing) |
+| `S3_USE_SSL` | no | `false` | `true` for https endpoints (VPS MinIO / R2) |
 | `PORT` | no | `8080` | HTTP listen port |
 | `CORS_ALLOWED_ORIGIN` | no | `http://localhost:1420` | The **client's** origin (one value). See below. |
+
+Alongside Postgres, the server now needs an **S3-compatible object store** for profile media: MinIO via `docker compose up -d` locally; MinIO-on-VPS or Cloudflare R2 in prod (plain S3 API only — nothing AWS-proprietary). Unreachable object storage at startup is fatal, same as the DB.
 
 **CORS:** a self-hoster must set `CORS_ALLOWED_ORIGIN` to the origin their client webview runs on, or every browser-side call is blocked. The packaged Tauri app's origin is `http://tauri.localhost` on Windows (`tauri://localhost` on macOS); the dev client is `http://localhost:1420` (the default).
 
@@ -143,6 +151,17 @@ Nodes are the installable, user-buildable unit on the client (the deck items). T
 - **Curated, not open.** Publishing requires auth; **owner-only gating is a follow-up** (any authenticated user can publish today). This matches the "curated now, community later" trust model — untrusted-code publishing is the future case that needs a real review/sandbox gate.
 - **Bundle storage is a deliberate carve-out from "no media/blob in v1."** A node bundle is a tiny JS file (kilobytes) stored as Postgres `bytea` — the same "small text/code in Postgres" reasoning as note bodies. This is **not** the heavy-media (photos, attachments, room files) the S3 phase covers; the no-blob-in-v1 rule is about user media, not code bundles.
 
+## Profile media (avatar + banner) — built
+
+The first slice of the S3 phase: a user attaches an **avatar** and a **banner** (images or GIFs) to their published profile — the Discord-style profile card. Implemented in `internal/media` (`storage.go` S3 wrapper / `store.go` metadata queries / `handler.go` HTTP), table `user_media`, using `minio-go` against any S3-compatible endpoint.
+
+- **Bytes in object storage, metadata in Postgres.** The object lives at the fixed key `users/<user_id>/<kind>`; the `user_media` row holds the sniffed content type, size, and `updated_at`. One key per (user, kind) means **reupload replaces in place**.
+- **Upload:** `PUT /me/media/{avatar|banner}` with the raw image bytes as the body (no multipart). The server sniffs the content type from the bytes (never trusts the header) and accepts only png/jpeg/gif/webp. Caps: 5 MiB avatar, 10 MiB banner. `DELETE /me/media/{kind}` clears (idempotent 204).
+- **Serve = authenticated pass-through:** `GET /media/{userID}/{kind}` streams the bytes **through the server** — the client never sees a bucket URL, the bucket stays private, and authorization is checked on every fetch. Presigned URLs were deliberately rejected: they'd hotlink a private bucket and require exposing the object store publicly.
+- **Visibility follows the self-card:** the owner always; an accepted friend only while the owner's profile visibility is `friends` (no saved card defaults to `friends`). Every not-allowed case collapses to an opaque `404 media_not_found`.
+- **Profile card integration:** `GET /me/profile` and `GET /profiles/{id}` expose `avatar_url` / `banner_url` — server-relative serve-URLs with a `?v=<updated_at>` cache-buster (null until uploaded).
+- `/health` now reports a `media` field (`up`/`down`); the DB alone still governs the HTTP status.
+
 ## API surface (to be detailed during planning)
 
 The contract will be split into HTTP (request/response) and WebSocket (real-time). Rough groupings:
@@ -200,7 +219,7 @@ These are settled — build to them, don't re-litigate:
 4. **Sync trigger:** debounced-autosync (push after an editing pause) is a trigger, not a new mode.
 5. **Cross-device auto-update:** server nudges over the existing WebSocket; client **auto-pulls in the background**, EXCEPT the note the user is actively editing (never auto-pulled, to keep last-write-wins safe). Feels live without full mirroring. (See "Sync / publish contract".)
 6. **Profile-card shape:** structured base fields (name, birthday, country, time zone; **age derived from birthday, not stored**) + freeform text. (See data model.)
-7. **No v1 media:** photo pass-through dropped entirely. All heavy media (photos, DM images, room files) deferred to a single **S3 / blob-storage phase**. Note image-paste is local-vault-only until then.
+7. **Media arrives as slices of one S3 phase:** the phase has started — **profile media (avatar/banner) is built** on S3-compatible object storage (MinIO locally; MinIO-on-VPS or R2 in prod). Photo libraries, DM images, note-attachment sync, and room files are later slices on the same plumbing. Note image-paste is local-vault-only until its slice.
 8. **Rate limiting:** standard **floor** — enough to keep the server from being knocked over (token-bucket on auth endpoints to stop brute-force; looser limits elsewhere). Not precision-tuned; friends-and-family scale.
 9. **Node store:** node bundles (small `node.js` files) live in **Postgres `bytea`** — a deliberate carve-out from the no-blob-in-v1 rule (that rule is about heavy *user media*, not code bundles). Publishing is auth-gated and **curated**; owner-only gating + server-side permission re-derivation are follow-ups. (See "Node store".)
 
@@ -209,14 +228,14 @@ These are settled — build to them, don't re-litigate:
 1. **Conflict mechanism:** exact divergence detection (per-item version vector? last-common-sync timestamp?). The active-note auto-pull exclusion keeps the common case safe, but the underlying divergence-detection mechanism still needs picking.
 2. **Games (server side):** deferred entirely. When picked up: how game bundles are stored/served, and whether the server relays opaque state, validates turns, or holds authority. Don't foreclose any of these now.
 3. **Rooms beyond messaging:** file sharing, file viewing, shared editing, etc. are anticipated but unspecified — design each when picked up. v1 is room-lifecycle + chat only.
-4. **S3 / blob-storage phase:** one later phase covering photo libraries, DM image attachments, syncing note attachments across devices, and any room files. Bucket layout, per-file caps, lifecycle, and which features it unblocks all get designed then.
+4. **S3 / blob-storage phase (remaining slices):** profile media is done (see "Profile media"); still to design when picked up: photo libraries, DM image attachments, syncing note attachments across devices, and any room files — per-slice bucket layout, caps, and lifecycle.
 
 ## What to refuse / push back on (server-level)
 
 - ❌ Federation or cross-server features. One official server; private servers are isolated.
 - ❌ Making the server the authoritative editing copy. It holds the *published* mirror.
 - ❌ Public discovery / username search. Friend codes only.
-- ❌ Any media/blob handling in v1 — no photo pass-through, no image storage. All heavy media is deferred to one later S3 phase. Don't build piecemeal media handling before then.
+- ❌ Media beyond the built profile slice (photo libraries, DM attachments, room files) before its S3-phase slice is actually picked up and designed — don't build piecemeal. And never serve media by handing out direct/presigned bucket URLs — pass-through only.
 - ❌ Persisting rooms past expiry.
 - ❌ OS push infrastructure. The server feeds in-app indicators only.
 - ❌ Baking Tauri-client assumptions into the API. The API is client-agnostic.

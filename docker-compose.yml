@@ -11,5 +11,23 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # S3-compatible object storage for profile media (avatars/banners). Local
+  # stand-in for MinIO-on-VPS or Cloudflare R2 in prod — the server only ever
+  # speaks the plain S3 API. The server creates the bucket itself on startup;
+  # no init container needed. Port 9001 is the MinIO web console (optional).
+  minio:
+    image: minio/minio:latest
+    container_name: ${DB_NAME}-minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${S3_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${S3_SECRET_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
 volumes:
   pgdata:
+  miniodata:

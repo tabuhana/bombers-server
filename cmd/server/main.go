@@ -21,6 +21,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/console"
 	"github.com/tabuhana/bombers-server/internal/friends"
+	"github.com/tabuhana/bombers-server/internal/media"
 	"github.com/tabuhana/bombers-server/internal/messaging"
 	"github.com/tabuhana/bombers-server/internal/nodes"
 	"github.com/tabuhana/bombers-server/internal/nodeshare"
@@ -52,6 +53,15 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Object storage (profile media) is part of the stack like Postgres is:
+	// unreachable at startup → fatal, same as the DB. Ensures the bucket too.
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	storage, err := media.NewStorage(ctx, cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
+	cancel()
+	if err != nil {
+		log.Fatalf("connecting to object storage: %v", err)
+	}
+
 	issuer := auth.NewIssuer(cfg.TokenSecret)
 	authService := auth.NewService(issuer, pool)
 	authHandler := auth.NewHandler(authService)
@@ -62,6 +72,7 @@ func main() {
 	syncHandler := sync.NewHandler(pool)
 	nodesHandler := nodes.NewHandler(pool)
 	nodeshareHandler := nodeshare.NewHandler(pool)
+	mediaHandler := media.NewHandler(pool, storage)
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
@@ -69,7 +80,7 @@ func main() {
 		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		AllowedHeaders: []string{"Authorization", "Content-Type"},
 	}))
-	r.Get("/health", healthHandler(pool))
+	r.Get("/health", healthHandler(pool, storage))
 	r.Post("/auth/register", usersHandler.Register)
 	r.Post("/auth/login", usersHandler.Login)
 	r.Post("/auth/refresh", authHandler.Refresh)
@@ -108,6 +119,11 @@ func main() {
 		r.Post("/nodes/send", nodeshareHandler.Send)
 		r.Get("/nodes/received", nodeshareHandler.ListReceived)
 		r.Delete("/nodes/received/{id}", nodeshareHandler.Dismiss)
+		// Profile media (avatar/banner): raw image bytes in, proxied bytes
+		// out. Serving is friendship + profile-visibility gated pass-through.
+		r.Put("/me/media/{kind}", mediaHandler.Upload)
+		r.Delete("/me/media/{kind}", mediaHandler.Delete)
+		r.Get("/media/{userID}/{kind}", mediaHandler.Serve)
 	})
 
 	startedAt := time.Now()
@@ -148,18 +164,26 @@ func main() {
 	log.Printf("server stopped")
 }
 
-func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {
+func healthHandler(pool *pgxpool.Pool, storage *media.Storage) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 
+		// The DB governs status and the HTTP code (unchanged contract: clients
+		// gate login on it). The media field is informational — object storage
+		// down degrades only the media endpoints, not the core product.
+		mediaState := "up"
+		if err := storage.Ping(ctx); err != nil {
+			mediaState = "down"
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		if err := pool.Ping(ctx); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"status":"degraded","db":"down"}`))
+			_, _ = w.Write([]byte(`{"status":"degraded","db":"down","media":"` + mediaState + `"}`))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok","db":"up"}`))
+		_, _ = w.Write([]byte(`{"status":"ok","db":"up","media":"` + mediaState + `"}`))
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/tabuhana/bombers-server/internal/types"
 )
 
 // Visibility values — mirror the CHECK constraint in the migration.
@@ -111,6 +113,40 @@ func areFriends(ctx context.Context, db dbExecutor, a, b string) (bool, error) {
 		return false, fmt.Errorf("check friendship: %w", err)
 	}
 	return ok, nil
+}
+
+// mediaURLs returns the serve-URLs for a user's uploaded profile media
+// (avatar/banner), nil for a kind they haven't uploaded. Narrow read against
+// the media domain's user_media table — same loose-coupling tradeoff as
+// areFriends below reaching into friendships. The URL shape lives in
+// types.MediaURL so this stays byte-identical to what the media domain emits.
+const mediaURLsSQL = `SELECT kind, updated_at FROM user_media WHERE user_id = $1`
+
+func mediaURLs(ctx context.Context, db dbExecutor, userID string) (avatar, banner *string, err error) {
+	rows, err := db.Query(ctx, mediaURLsSQL, userID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get media urls: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var kind string
+		var updatedAt time.Time
+		if err := rows.Scan(&kind, &updatedAt); err != nil {
+			return nil, nil, fmt.Errorf("scan media row: %w", err)
+		}
+		url := types.MediaURL(userID, kind, updatedAt)
+		switch kind {
+		case types.MediaKindAvatar:
+			avatar = &url
+		case types.MediaKindBanner:
+			banner = &url
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate media rows: %w", err)
+	}
+	return avatar, banner, nil
 }
 
 // userExists guards GetForUser so a request for a nonexistent user collapses to

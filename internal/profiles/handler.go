@@ -47,7 +47,9 @@ func NewHandler(pool *pgxpool.Pool) *Handler {
 
 // profileResponse is the JSON-safe view of a self-card. Birthday is emitted as
 // "YYYY-MM-DD" (or null); age is derived from it at read time. updated_at is nil
-// for a profile that has never been saved.
+// for a profile that has never been saved. avatar_url/banner_url are
+// server-relative, versioned serve-URLs (see types.MediaURL) — null until the
+// user uploads that media kind.
 type profileResponse struct {
 	UserID      string     `json:"user_id"`
 	DisplayName string     `json:"display_name"`
@@ -57,7 +59,22 @@ type profileResponse struct {
 	Timezone    string     `json:"timezone"`
 	Bio         string     `json:"bio"`
 	Visibility  string     `json:"visibility"`
+	AvatarURL   *string    `json:"avatar_url"`
+	BannerURL   *string    `json:"banner_url"`
 	UpdatedAt   *time.Time `json:"updated_at"`
+}
+
+// attachMedia fills the response's avatar/banner URLs from the user_media
+// metadata. A failure is logged but never sinks the profile response — the
+// card is still useful without its images.
+func (h *Handler) attachMedia(ctx context.Context, resp *profileResponse) {
+	avatar, banner, err := mediaURLs(ctx, h.pool, resp.UserID)
+	if err != nil {
+		log.Printf("profiles: media urls: %v", err)
+		return
+	}
+	resp.AvatarURL = avatar
+	resp.BannerURL = banner
 }
 
 // toResponse renders a stored record into the wire shape, deriving age from the
@@ -112,14 +129,20 @@ func (h *Handler) GetMine(w http.ResponseWriter, r *http.Request) {
 	p, err := getProfile(r.Context(), h.pool, authedID)
 	if err != nil {
 		if errors.Is(err, ErrProfileNotFound) {
-			httpx.WriteJSON(w, http.StatusOK, defaultProfile(authedID))
+			// Media can exist before the text card is first saved, so the
+			// default shape still carries the URLs.
+			resp := defaultProfile(authedID)
+			h.attachMedia(r.Context(), &resp)
+			httpx.WriteJSON(w, http.StatusOK, resp)
 			return
 		}
 		log.Printf("profiles: get mine: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not fetch profile")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toResponse(p, time.Now()))
+	resp := toResponse(p, time.Now())
+	h.attachMedia(r.Context(), &resp)
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 type updateProfileRequest struct {
@@ -159,7 +182,9 @@ func (h *Handler) UpdateMine(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "could not save profile")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toResponse(saved, time.Now()))
+	resp := toResponse(saved, time.Now())
+	h.attachMedia(r.Context(), &resp)
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // toRecord validates and normalizes the request into a storable record. Returns
@@ -226,7 +251,9 @@ func (h *Handler) GetForUser(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusNotFound, code)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toResponse(p, time.Now()))
+	resp := toResponse(p, time.Now())
+	h.attachMedia(r.Context(), &resp)
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // resolveVisibleProfile applies the authorization rules and returns either the
