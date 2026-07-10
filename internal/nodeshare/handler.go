@@ -12,7 +12,6 @@ package nodeshare
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 const (
@@ -103,7 +103,7 @@ func (h *Handler) Send(w http.ResponseWriter, r *http.Request) {
 		Bundle:      req.Bundle,
 	}
 	if err := insertTransfer(r.Context(), h.pool, t); err != nil {
-		log.Printf("nodeshare: insert: %v", err)
+		logx.Error("nodeshare: insert: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not send node")
 		return
 	}
@@ -121,7 +121,7 @@ func (h *Handler) ListReceived(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := listReceived(r.Context(), h.pool, authedID)
 	if err != nil {
-		log.Printf("nodeshare: list received: %v", err)
+		logx.Error("nodeshare: list received: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not list received nodes")
 		return
 	}
@@ -156,7 +156,7 @@ func (h *Handler) Dismiss(w http.ResponseWriter, r *http.Request) {
 
 	deleted, err := deleteReceived(r.Context(), h.pool, id, authedID)
 	if err != nil {
-		log.Printf("nodeshare: dismiss: %v", err)
+		logx.Error("nodeshare: dismiss: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not dismiss transfer")
 		return
 	}
@@ -173,7 +173,7 @@ func (h *Handler) Dismiss(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) guardRecipient(ctx context.Context, senderID, recipientID string) string {
 	exists, err := userExists(ctx, h.pool, recipientID)
 	if err != nil {
-		log.Printf("nodeshare: user exists: %v", err)
+		logx.Error("nodeshare: user exists: %v", err)
 		return errRecipient
 	}
 	if !exists {
@@ -181,7 +181,7 @@ func (h *Handler) guardRecipient(ctx context.Context, senderID, recipientID stri
 	}
 	friends, err := areFriends(ctx, h.pool, senderID, recipientID)
 	if err != nil {
-		log.Printf("nodeshare: are friends: %v", err)
+		logx.Error("nodeshare: are friends: %v", err)
 		return errRecipient
 	}
 	if !friends {

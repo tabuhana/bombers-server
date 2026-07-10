@@ -10,7 +10,6 @@ package nodes
 
 import (
 	"errors"
-	"log"
 	"net/http"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 const errNodeNotFound = "node_not_found"
@@ -48,7 +48,7 @@ type catalogResponse struct {
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	entries, err := Catalog(r.Context(), h.pool)
 	if err != nil {
-		log.Printf("nodes: catalog: %v", err)
+		logx.Error("nodes: catalog: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to list nodes")
 		return
 	}
@@ -78,7 +78,7 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("nodes: bundle %s: %v", id, err)
+		logx.Error("nodes: bundle %s: %v", id, err)
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to read bundle")
 		return
 	}

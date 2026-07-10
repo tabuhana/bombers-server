@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"time"
 
@@ -27,6 +26,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 const (
@@ -85,7 +85,7 @@ func (h *Handler) ListMyAbout(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := listAboutByAuthor(r.Context(), h.pool, authedID)
 	if err != nil {
-		log.Printf("profiles: list about: %v", err)
+		logx.Error("profiles: list about: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not list about-cards")
 		return
 	}
@@ -116,7 +116,7 @@ func (h *Handler) GetMyAbout(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteJSON(w, http.StatusOK, emptyAbout(authedID, subjectID))
 			return
 		}
-		log.Printf("profiles: get my about: %v", err)
+		logx.Error("profiles: get my about: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not fetch about-card")
 		return
 	}
@@ -178,7 +178,7 @@ func (h *Handler) UpsertMyAbout(w http.ResponseWriter, r *http.Request) {
 		Visibility: visibility,
 	})
 	if err != nil {
-		log.Printf("profiles: upsert about: %v", err)
+		logx.Error("profiles: upsert about: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not save about-card")
 		return
 	}
@@ -201,7 +201,7 @@ func (h *Handler) DeleteMyAbout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := deleteAbout(r.Context(), h.pool, authedID, subjectID); err != nil {
-		log.Printf("profiles: delete about: %v", err)
+		logx.Error("profiles: delete about: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not delete about-card")
 		return
 	}
@@ -231,7 +231,7 @@ func (h *Handler) GetSharedAbout(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusNotFound, errAboutNotFound)
 			return
 		}
-		log.Printf("profiles: get shared about: %v", err)
+		logx.Error("profiles: get shared about: %v", err)
 		httpx.WriteError(w, http.StatusNotFound, errAboutNotFound)
 		return
 	}
@@ -242,7 +242,7 @@ func (h *Handler) GetSharedAbout(w http.ResponseWriter, r *http.Request) {
 
 	friends, err := areFriends(r.Context(), h.pool, authorID, authedID)
 	if err != nil {
-		log.Printf("profiles: shared about friendship: %v", err)
+		logx.Error("profiles: shared about friendship: %v", err)
 		httpx.WriteError(w, http.StatusNotFound, errAboutNotFound)
 		return
 	}
@@ -259,7 +259,7 @@ func (h *Handler) GetSharedAbout(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) guardSubject(ctx context.Context, authedID, subjectID string) string {
 	exists, err := userExists(ctx, h.pool, subjectID)
 	if err != nil {
-		log.Printf("profiles: about user exists: %v", err)
+		logx.Error("profiles: about user exists: %v", err)
 		return errSubjectNotFriend
 	}
 	if !exists {
@@ -267,7 +267,7 @@ func (h *Handler) guardSubject(ctx context.Context, authedID, subjectID string) 
 	}
 	friends, err := areFriends(ctx, h.pool, authedID, subjectID)
 	if err != nil {
-		log.Printf("profiles: about are friends: %v", err)
+		logx.Error("profiles: about are friends: %v", err)
 		return errSubjectNotFriend
 	}
 	if !friends {

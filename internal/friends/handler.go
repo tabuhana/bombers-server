@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
@@ -16,6 +15,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 	"github.com/tabuhana/bombers-server/internal/types"
 )
 
@@ -83,7 +83,7 @@ func (h *Handler) MyCode(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		log.Printf("friends: get own friend code: %v", err)
+		logx.Error("friends: get own friend code: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not fetch friend code")
 		return
 	}
@@ -132,7 +132,7 @@ func (h *Handler) SendRequest(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusNotFound, errUnknownFriendCode)
 			return
 		}
-		log.Printf("friends: resolve friend code: %v", err)
+		logx.Error("friends: resolve friend code: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not send request")
 		return
 	}
@@ -175,7 +175,7 @@ func writeSendRequestError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, se.status, se.code)
 		return
 	}
-	log.Printf("friends: send request: %v", err)
+	logx.Error("friends: send request: %v", err)
 	httpx.WriteError(w, http.StatusInternalServerError, "could not send request")
 }
 
@@ -390,7 +390,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	records, err := listAcceptedFriends(r.Context(), h.pool, authedID)
 	if err != nil {
-		log.Printf("friends: list: %v", err)
+		logx.Error("friends: list: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not list friends")
 		return
 	}
@@ -420,7 +420,7 @@ func (h *Handler) ListRequests(w http.ResponseWriter, r *http.Request) {
 
 	records, err := listPendingRequests(r.Context(), h.pool, authedID)
 	if err != nil {
-		log.Printf("friends: list requests: %v", err)
+		logx.Error("friends: list requests: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not list requests")
 		return
 	}

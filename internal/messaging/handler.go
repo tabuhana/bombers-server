@@ -10,7 +10,6 @@ package messaging
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 const (
@@ -116,7 +116,7 @@ func (h *Handler) Send(w http.ResponseWriter, r *http.Request) {
 		Body:        body,
 	})
 	if err != nil {
-		log.Printf("messaging: insert: %v", err)
+		logx.Error("messaging: insert: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not send message")
 		return
 	}
@@ -147,7 +147,7 @@ func (h *Handler) History(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"))
 	rows, err := listConversation(r.Context(), h.pool, authedID, otherID, limit)
 	if err != nil {
-		log.Printf("messaging: history: %v", err)
+		logx.Error("messaging: history: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not load messages")
 		return
 	}
@@ -160,13 +160,74 @@ func (h *Handler) History(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"messages": out})
 }
 
+// unreadConversation is one peer's entry in the unread summary.
+type unreadConversation struct {
+	UserID string `json:"user_id"`
+	Count  int64  `json:"count"`
+}
+
+// Unread returns the authed user's unread DM summary in one request: a per-peer
+// count of messages received but not yet read, plus the grand total. Read state
+// is server-authoritative (a message_reads marker per peer), so this reflects
+// reads made on any device. Nothing unread → empty conversations list, total 0.
+func (h *Handler) Unread(w http.ResponseWriter, r *http.Request) {
+	authedID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	entries, err := unreadCounts(r.Context(), h.pool, authedID)
+	if err != nil {
+		logx.Error("messaging: unread: %v", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "could not load unread counts")
+		return
+	}
+
+	// make (not nil) so an empty summary serializes as [] rather than null.
+	conversations := make([]unreadConversation, len(entries))
+	var total int64
+	for i, e := range entries {
+		conversations[i] = unreadConversation{UserID: e.PeerID, Count: e.Count}
+		total += e.Count
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"conversations": conversations,
+		"total":         total,
+	})
+}
+
+// MarkRead marks the authed user's conversation with {userID} read up to now
+// (server time), advancing the server-authoritative read marker so the unread
+// count clears on every device. A missing or self-target path param is a client
+// mistake (there's no such conversation to mark) → 400. Success is 204.
+func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
+	authedID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	peerID := strings.TrimSpace(chi.URLParam(r, "userID"))
+	if peerID == "" || peerID == authedID {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid conversation")
+		return
+	}
+
+	if err := markRead(r.Context(), h.pool, authedID, peerID, time.Now()); err != nil {
+		logx.Error("messaging: mark read: %v", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "could not mark read")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // guardRecipient returns "" if the authed user may converse with other, else an
 // opaque error code. A DB failure is logged and collapsed to the opaque code so
 // the handler never leaks whether a user exists or is a friend.
 func (h *Handler) guardRecipient(ctx context.Context, authedID, otherID string) string {
 	exists, err := userExists(ctx, h.pool, otherID)
 	if err != nil {
-		log.Printf("messaging: user exists: %v", err)
+		logx.Error("messaging: user exists: %v", err)
 		return errRecipient
 	}
 	if !exists {
@@ -174,7 +235,7 @@ func (h *Handler) guardRecipient(ctx context.Context, authedID, otherID string) 
 	}
 	friends, err := areFriends(ctx, h.pool, authedID, otherID)
 	if err != nil {
-		log.Printf("messaging: are friends: %v", err)
+		logx.Error("messaging: are friends: %v", err)
 		return errRecipient
 	}
 	if !friends {

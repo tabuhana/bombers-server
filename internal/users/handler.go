@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 	"github.com/tabuhana/bombers-server/internal/types"
 )
 
@@ -66,9 +66,9 @@ type loginRequest struct {
 // browser sessions hang on short). The server just issues both.
 type loginResponse struct {
 	User         types.PublicUser `json:"user"`
-	AccessToken  string     `json:"access_token"`
-	RefreshToken string     `json:"refresh_token"`
-	ExpiresIn    int        `json:"expires_in"` // seconds until access token expires
+	AccessToken  string           `json:"access_token"`
+	RefreshToken string           `json:"refresh_token"`
+	ExpiresIn    int              `json:"expires_in"` // seconds until access token expires
 }
 
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +92,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		log.Printf("users: bcrypt hash: %v", err)
+		logx.Error("users: bcrypt hash: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not hash password")
 		return
 	}
@@ -103,7 +103,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrUsernameTaken):
 			httpx.WriteError(w, http.StatusConflict, "username already taken")
 		default:
-			log.Printf("users: create user: %v", err)
+			logx.Error("users: create user: %v", err)
 			httpx.WriteError(w, http.StatusInternalServerError, "could not create user")
 		}
 		return
@@ -125,7 +125,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	user, err := getUserByCanonical(r.Context(), h.pool, canonical)
 	if err != nil && !errors.Is(err, ErrUserNotFound) {
-		log.Printf("users: lookup by canonical: %v", err)
+		logx.Error("users: lookup by canonical: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not process login")
 		return
 	}
@@ -146,7 +146,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	pair, err := h.auth.IssueInitialPair(r.Context(), user.ID)
 	if err != nil {
-		log.Printf("users: issue token pair: %v", err)
+		logx.Error("users: issue token pair: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not issue tokens")
 		return
 	}
@@ -175,7 +175,7 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		log.Printf("users: get by id: %v", err)
+		logx.Error("users: get by id: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not fetch user")
 		return
 	}

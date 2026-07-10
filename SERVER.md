@@ -57,10 +57,13 @@ Alongside Postgres, the server now needs an **S3-compatible object store** for p
 bombers> help     # list commands
 bombers> users    # registered users (username, id, created)
 bombers> status   # uptime, DB ping, row counts
+bombers> logtime  # show/set the log timestamp format (time|datetime|iso)
 bombers> stop     # graceful shutdown (aliases: quit, exit)
 ```
 
 The console is local-operator-privileged (whoever holds the terminal is the op — no auth). For daemons/service managers, `--headless` skips the console and the process serves until SIGINT/SIGTERM (a non-TTY stdin or console EOF falls back to the same). Destructive admin commands (delete user, promote admin) are a deliberate later follow-up.
+
+**Startup + logging:** on a real terminal the console opens with a colored **BOMBERS/NOTEBOOK** ASCII banner, then the startup logs, then the `bombers>` prompt. Every server log (startup lifecycle + per-request error logs) prints one line as `[<timestamp>][<LEVEL>]: <message>` through the shared `internal/logx` package (levels `INFO`/`WARN`/`ERROR`/`FATAL`; `FATAL` exits 1). Color is 24-bit truecolor, auto-enabled only when stdout is a character device **and** `NO_COLOR` is unset — piped or redirected output stays plain and greppable, and the banner is skipped. `LOG_TIME_FORMAT` (`time` = `15:04:05`, `datetime` = `2006-01-02 15:04:05`, `iso` = RFC 3339; default `datetime`) picks the timestamp layout at boot; the `logtime` console command switches it live.
 
 ## Tech stack (proposed — confirm during planning)
 
@@ -89,6 +92,7 @@ To be fleshed out during planning. The major entities:
   - *Self-card*: authored by user A about themselves, with a visibility rule (all friends / specific friends).
 - **Event** — an event/date with an owner and invitees; invitee acceptance copies it to the invitee's calendar.
 - **Message** — a DM between two users. **Text persisted indefinitely in Postgres** (DMs aren't ephemeral; rooms are). Small relational rows — forever-retention costs essentially nothing at this scale, and any device that authenticates pulls history from the DB, so this is already a true cross-device sync with no extra infrastructure. **Image/file attachments are deferred to the S3 phase** (no image messaging in v1) and, when added, will live in **S3 and persist in history just like text** — we don't want gaps in conversation context.
+  - *Read state is server-authoritative,* so unread badges match across a user's devices (read on one → cleared on all). A per-`(user, peer)` last-read marker (`message_reads` table) advances **monotonically** and can never rewind; a received message is unread until it's older than the reader's marker for that sender. `GET /messages/unread` returns the per-peer unread counts + total in one request; `POST /messages/{userID}/read` marks a conversation read up to now. This is durable REST state, independent of the later WebSocket "feels live" layer.
 - **Room** — ephemeral. Exists while occupied; expires when empty. Membership + transient state, not persisted past expiry.
 
 Note the asymmetry: **DMs persist, rooms don't.** DM history is retained **indefinitely** (decided) — it's cheap relational text.

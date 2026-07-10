@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 	"github.com/tabuhana/bombers-server/internal/types"
 )
 
@@ -117,14 +117,14 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.storage.Put(r.Context(), authedID, kind, data, contentType); err != nil {
-		log.Printf("media: put object: %v", err)
+		logx.Error("media: put object: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not store media")
 		return
 	}
 
 	m, err := upsertMedia(r.Context(), h.pool, authedID, kind, contentType, int64(len(data)))
 	if err != nil {
-		log.Printf("media: upsert metadata: %v", err)
+		logx.Error("media: upsert metadata: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not store media")
 		return
 	}
@@ -150,14 +150,14 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := deleteMedia(r.Context(), h.pool, authedID, kind); err != nil {
-		log.Printf("media: delete metadata: %v", err)
+		logx.Error("media: delete metadata: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not delete media")
 		return
 	}
 	if err := h.storage.Remove(r.Context(), authedID, kind); err != nil {
 		// Best-effort: the row is gone so nothing serves or links this object
 		// anymore; log and move on rather than failing the delete.
-		log.Printf("media: remove object: %v", err)
+		logx.Error("media: remove object: %v", err)
 	}
 	httpx.WriteJSON(w, http.StatusNoContent, nil)
 }
@@ -186,7 +186,7 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request) {
 	if ownerID != authedID {
 		friends, err := areFriends(r.Context(), h.pool, authedID, ownerID)
 		if err != nil {
-			log.Printf("media: are friends: %v", err)
+			logx.Error("media: are friends: %v", err)
 			httpx.WriteError(w, http.StatusNotFound, errMediaNotFound)
 			return
 		}
@@ -196,7 +196,7 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request) {
 		}
 		visibility, err := profileVisibility(r.Context(), h.pool, ownerID)
 		if err != nil {
-			log.Printf("media: profile visibility: %v", err)
+			logx.Error("media: profile visibility: %v", err)
 			httpx.WriteError(w, http.StatusNotFound, errMediaNotFound)
 			return
 		}
@@ -209,7 +209,7 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request) {
 	m, err := getMedia(r.Context(), h.pool, ownerID, kind)
 	if err != nil {
 		if !errors.Is(err, ErrMediaNotFound) {
-			log.Printf("media: get metadata: %v", err)
+			logx.Error("media: get metadata: %v", err)
 		}
 		httpx.WriteError(w, http.StatusNotFound, errMediaNotFound)
 		return
@@ -229,7 +229,7 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// A metadata row without an object is an inconsistency worth logging
 		// loudly, but the client just sees the same opaque 404.
-		log.Printf("media: get object for %s/%s: %v", ownerID, kind, err)
+		logx.Error("media: get object for %s/%s: %v", ownerID, kind, err)
 		httpx.WriteError(w, http.StatusNotFound, errMediaNotFound)
 		return
 	}
@@ -245,6 +245,6 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.Copy(w, obj); err != nil {
 		// Headers are flushed; nothing to send the client. Usually a canceled
 		// download, not a server fault.
-		log.Printf("media: stream object: %v", err)
+		logx.Error("media: stream object: %v", err)
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 const (
@@ -70,7 +70,7 @@ type profileResponse struct {
 func (h *Handler) attachMedia(ctx context.Context, resp *profileResponse) {
 	avatar, banner, err := mediaURLs(ctx, h.pool, resp.UserID)
 	if err != nil {
-		log.Printf("profiles: media urls: %v", err)
+		logx.Error("profiles: media urls: %v", err)
 		return
 	}
 	resp.AvatarURL = avatar
@@ -136,7 +136,7 @@ func (h *Handler) GetMine(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteJSON(w, http.StatusOK, resp)
 			return
 		}
-		log.Printf("profiles: get mine: %v", err)
+		logx.Error("profiles: get mine: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not fetch profile")
 		return
 	}
@@ -178,7 +178,7 @@ func (h *Handler) UpdateMine(w http.ResponseWriter, r *http.Request) {
 
 	saved, err := upsertProfile(r.Context(), h.pool, rec)
 	if err != nil {
-		log.Printf("profiles: upsert: %v", err)
+		logx.Error("profiles: upsert: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not save profile")
 		return
 	}
@@ -270,7 +270,7 @@ func (h *Handler) resolveVisibleProfile(ctx context.Context, authedID, targetID 
 				// caller still gets a 200 with a usable shape.
 				return &profileRecord{UserID: authedID, Visibility: VisibilityFriends}, ""
 			}
-			log.Printf("profiles: get own (via for-user): %v", err)
+			logx.Error("profiles: get own (via for-user): %v", err)
 			return nil, errProfileNotFound
 		}
 		return p, ""
@@ -278,7 +278,7 @@ func (h *Handler) resolveVisibleProfile(ctx context.Context, authedID, targetID 
 
 	exists, err := userExists(ctx, h.pool, targetID)
 	if err != nil {
-		log.Printf("profiles: user exists: %v", err)
+		logx.Error("profiles: user exists: %v", err)
 		return nil, errProfileNotFound
 	}
 	if !exists {
@@ -287,7 +287,7 @@ func (h *Handler) resolveVisibleProfile(ctx context.Context, authedID, targetID 
 
 	friends, err := areFriends(ctx, h.pool, authedID, targetID)
 	if err != nil {
-		log.Printf("profiles: are friends: %v", err)
+		logx.Error("profiles: are friends: %v", err)
 		return nil, errProfileNotFound
 	}
 	if !friends {
@@ -299,7 +299,7 @@ func (h *Handler) resolveVisibleProfile(ctx context.Context, authedID, targetID 
 		if errors.Is(err, ErrProfileNotFound) {
 			return nil, errProfileNotFound
 		}
-		log.Printf("profiles: get for user: %v", err)
+		logx.Error("profiles: get for user: %v", err)
 		return nil, errProfileNotFound
 	}
 	if p.Visibility != VisibilityFriends {

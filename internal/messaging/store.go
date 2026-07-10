@@ -108,3 +108,62 @@ func areFriends(ctx context.Context, db dbExecutor, a, b string) (bool, error) {
 	}
 	return ok, nil
 }
+
+// UnreadEntry is one peer's unread tally: how many messages that peer sent the
+// caller that the caller hasn't read yet.
+type UnreadEntry struct {
+	PeerID string
+	Count  int64
+}
+
+// markReadSQL upserts the caller's last-read marker for a peer conversation.
+// It is MONOTONIC: on conflict we keep the GREATEST of the stored and incoming
+// timestamps, so a late/out-of-order call (e.g. a slow device) can never rewind
+// read state that another device already advanced.
+const markReadSQL = `
+INSERT INTO message_reads (user_id, peer_id, last_read_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (user_id, peer_id)
+DO UPDATE SET last_read_at = GREATEST(message_reads.last_read_at, EXCLUDED.last_read_at)
+`
+
+func markRead(ctx context.Context, db dbExecutor, userID, peerID string, at time.Time) error {
+	if _, err := db.Exec(ctx, markReadSQL, userID, peerID, at); err != nil {
+		return fmt.Errorf("mark read: %w", err)
+	}
+	return nil
+}
+
+// unreadCountsSQL tallies, per sender, how many messages the caller has received
+// that are newer than their last-read marker for that sender (or all of them when
+// no marker exists — the LEFT JOIN leaves last_read_at NULL). Peers with nothing
+// unread don't appear. Ordered by peer for a stable response.
+const unreadCountsSQL = `
+SELECT m.sender_id, COUNT(*)::bigint
+FROM messages m
+LEFT JOIN message_reads r ON r.user_id = $1 AND r.peer_id = m.sender_id
+WHERE m.recipient_id = $1 AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
+GROUP BY m.sender_id
+ORDER BY m.sender_id
+`
+
+func unreadCounts(ctx context.Context, db dbExecutor, userID string) ([]UnreadEntry, error) {
+	rows, err := db.Query(ctx, unreadCountsSQL, userID)
+	if err != nil {
+		return nil, fmt.Errorf("unread counts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UnreadEntry
+	for rows.Next() {
+		var e UnreadEntry
+		if err := rows.Scan(&e.PeerID, &e.Count); err != nil {
+			return nil, fmt.Errorf("scan unread count: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate unread counts: %w", err)
+	}
+	return out, nil
+}

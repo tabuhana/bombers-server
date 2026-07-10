@@ -18,7 +18,6 @@ package sync
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 
@@ -26,6 +25,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 const (
@@ -107,7 +107,7 @@ func (h *Handler) Push(w http.ResponseWriter, r *http.Request) {
 	// An empty batch is a valid no-op "touch" — it still refreshes last-synced.
 	results, syncedAt, err := pushItems(r.Context(), h.pool, ownerID, records)
 	if err != nil {
-		log.Printf("sync: push: %v", err)
+		logx.Error("sync: push: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not push items")
 		return
 	}
@@ -198,7 +198,7 @@ func (h *Handler) Pull(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := pullItems(r.Context(), h.pool, ownerID, since)
 	if err != nil {
-		log.Printf("sync: pull: %v", err)
+		logx.Error("sync: pull: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not pull items")
 		return
 	}
@@ -231,7 +231,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 
 	s, err := getSyncStatus(r.Context(), h.pool, ownerID)
 	if err != nil {
-		log.Printf("sync: status: %v", err)
+		logx.Error("sync: status: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not fetch sync status")
 		return
 	}

@@ -3,10 +3,10 @@ package auth
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 const (
@@ -59,7 +59,7 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 			// Service.Rotate; nothing more to say here.
 			httpx.WriteError(w, http.StatusUnauthorized, errUnauthorized)
 		default:
-			log.Printf("auth: rotate refresh token: %v", err)
+			logx.Error("auth: rotate refresh token: %v", err)
 			httpx.WriteError(w, http.StatusInternalServerError, "could not refresh tokens")
 		}
 		return

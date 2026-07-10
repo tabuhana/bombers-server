@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +20,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/console"
 	"github.com/tabuhana/bombers-server/internal/friends"
+	"github.com/tabuhana/bombers-server/internal/logx"
 	"github.com/tabuhana/bombers-server/internal/media"
 	"github.com/tabuhana/bombers-server/internal/messaging"
 	"github.com/tabuhana/bombers-server/internal/nodes"
@@ -36,22 +36,35 @@ func main() {
 		"serve without the interactive admin console (stop with SIGINT/SIGTERM)")
 	flag.Parse()
 
-	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		log.Fatalf("loading .env: %v", err)
+	// Load .env before configuring the logger so LOG_TIME_FORMAT / NO_COLOR from
+	// the file take effect; hold any real load error until logx is up to report
+	// it in the leveled format.
+	envErr := godotenv.Load()
+	logx.Init()
+	if envErr != nil && !errors.Is(envErr, fs.ErrNotExist) {
+		logx.Fatal("loading .env: %v", envErr)
+	}
+
+	// The banner is decorative — print it on a real terminal only so piped or
+	// redirected logs stay clean.
+	if logx.Interactive() {
+		printBanner(os.Stdout)
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal(err)
+		logx.Fatal("%v", err)
 	}
+	logx.Info("config loaded (.env)")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	pool, err := store.NewPool(ctx, cfg.DatabaseURL)
 	cancel()
 	if err != nil {
-		log.Fatalf("connecting to database: %v", err)
+		logx.Fatal("connecting to database: %v", err)
 	}
 	defer pool.Close()
+	logx.Info("db connected")
 
 	// Object storage (profile media) is part of the stack like Postgres is:
 	// unreachable at startup → fatal, same as the DB. Ensures the bucket too.
@@ -59,8 +72,9 @@ func main() {
 	storage, err := media.NewStorage(ctx, cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
 	cancel()
 	if err != nil {
-		log.Fatalf("connecting to object storage: %v", err)
+		logx.Fatal("connecting to object storage: %v", err)
 	}
+	logx.Info("media bucket %q ready", cfg.S3Bucket)
 
 	issuer := auth.NewIssuer(cfg.TokenSecret)
 	authService := auth.NewService(issuer, pool)
@@ -106,7 +120,12 @@ func main() {
 		r.Delete("/me/about/{subjectID}", profilesHandler.DeleteMyAbout)
 		r.Get("/about/{authorID}", profilesHandler.GetSharedAbout)
 		r.Post("/messages", messagingHandler.Send)
+		// Static /messages/unread is registered before the /messages/{userID}
+		// param route so chi matches it first (it would anyway — static beats
+		// wildcard — but keep them together).
+		r.Get("/messages/unread", messagingHandler.Unread)
 		r.Get("/messages/{userID}", messagingHandler.History)
+		r.Post("/messages/{userID}/read", messagingHandler.MarkRead)
 		r.Post("/sync/push", syncHandler.Push)
 		r.Get("/sync/pull", syncHandler.Pull)
 		r.Get("/sync/status", syncHandler.Status)
@@ -128,12 +147,15 @@ func main() {
 
 	startedAt := time.Now()
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
+	// Log the listen line from the MAIN goroutine, before the console prints its
+	// prompt — otherwise this fires from the serve goroutine a beat later and
+	// lands on the "bombers> " line, eating the prompt.
+	logx.Info("http listening on %s", srv.Addr)
 	go func() {
-		log.Printf("listening on %s", srv.Addr)
 		// A serve error at startup (e.g. port in use) is fatal in both modes;
 		// ErrServerClosed is the normal graceful-shutdown exit.
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("http server: %v", err)
+			logx.Fatal("http server: %v", err)
 		}
 	}()
 
@@ -144,24 +166,25 @@ func main() {
 	// exiting or spinning.
 	stopped := false
 	if !*headless && console.Interactive(os.Stdin) {
+		logx.Info(`console ready — type "help", "stop" to quit`)
 		stopped = console.New(pool, storage, startedAt).Run()
 		if !stopped {
-			log.Printf("console input ended; running headless (SIGINT/SIGTERM to stop)")
+			logx.Warn("console input ended; running headless (SIGINT/SIGTERM to stop)")
 		}
 	}
 	if !stopped {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 		s := <-sig
-		log.Printf("received %s, shutting down", s)
+		logx.Info("received %s, shutting down", s)
 	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("graceful shutdown: %v", err)
+		logx.Error("graceful shutdown: %v", err)
 	}
-	log.Printf("server stopped")
+	logx.Info("server stopped")
 }
 
 func healthHandler(pool *pgxpool.Pool, storage *media.Storage) http.HandlerFunc {

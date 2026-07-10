@@ -5,8 +5,9 @@ package httpx
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
+
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 // ErrorBody is the JSON shape returned for any non-2xx response: {"error": "..."}.
@@ -24,7 +25,7 @@ func WriteJSON(w http.ResponseWriter, status int, body any) {
 		return
 	}
 	if err := json.NewEncoder(w).Encode(body); err != nil {
-		log.Printf("httpx: encode response: %v", err)
+		logx.Error("httpx: encode response: %v", err)
 	}
 }
 

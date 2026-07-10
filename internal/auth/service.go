@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 // Errors returned by Service. Both collapse to a single 401 at the HTTP
@@ -122,14 +123,14 @@ func (s *Service) Rotate(ctx context.Context, rawRefresh string) (TokenPair, err
 		// user, then EXPLICITLY COMMIT so the kill persists — the deferred
 		// Rollback above must not undo this.
 		if err := invalidateAllUserRefreshTokens(ctx, tx, row.UserID); err != nil {
-			log.Printf("auth: reuse-detection invalidate failed for user %s: %v", row.UserID, err)
+			logx.Error("auth: reuse-detection invalidate failed for user %s: %v", row.UserID, err)
 			return TokenPair{}, ErrRefreshReused
 		}
 		if err := tx.Commit(ctx); err != nil {
-			log.Printf("auth: reuse-detection commit failed for user %s: %v", row.UserID, err)
+			logx.Error("auth: reuse-detection commit failed for user %s: %v", row.UserID, err)
 			return TokenPair{}, ErrRefreshReused
 		}
-		log.Printf("auth: refresh-token reuse detected for user %s; all tokens invalidated", row.UserID)
+		logx.Warn("auth: refresh-token reuse detected for user %s; all tokens invalidated", row.UserID)
 		return TokenPair{}, ErrRefreshReused
 	}
 

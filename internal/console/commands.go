@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tabuhana/bombers-server/internal/logx"
 	"github.com/tabuhana/bombers-server/internal/nodes"
 )
 
@@ -21,6 +22,7 @@ func builtins() []command {
 		{name: "help", help: "list available commands", run: runHelp},
 		{name: "users", help: "list registered users (username, id, created)", run: runUsers},
 		{name: "status", help: "uptime, DB + media ping, and row counts", run: runStatus},
+		{name: "logtime", help: "show or set the log timestamp format (time|datetime|iso)", run: runLogtime},
 		{name: "store", help: "list store-published nodes (id, name, version)", run: runStore},
 		{name: "publish", help: "publish <path> — put a {manifest, files} JSON bundle in the node store", run: runPublish},
 		{name: "unpublish", help: "unpublish <id> — remove a node from the store", run: runUnpublish},
@@ -102,6 +104,24 @@ func runStatus(ctx context.Context, c *Console, _ []string) error {
 		}
 		fmt.Fprintf(c.out, "  %-22s %d\n", q.label+":", n)
 	}
+	return nil
+}
+
+// runLogtime shows or switches the live log timestamp format. With no argument
+// it prints the choices and the current one; with an argument it sets it (and
+// the change is announced through the logger itself so you see the new format).
+func runLogtime(_ context.Context, c *Console, args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintln(c.out, "  time · datetime · iso")
+		fmt.Fprintf(c.out, "  current: %s\n", logx.TimeFormat())
+		return nil
+	}
+	name := args[0]
+	if err := logx.SetTimeFormat(name); err != nil {
+		fmt.Fprintf(c.out, "unknown format %q — use time|datetime|iso\n", name)
+		return nil
+	}
+	logx.Info("log time format → %s", name)
 	return nil
 }
 

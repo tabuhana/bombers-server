@@ -80,7 +80,6 @@ func Interactive(f *os.File) bool {
 // true) or stdin ends/fails (returns false — the caller should fall back to
 // signal-waiting and keep serving, exactly like --headless).
 func (c *Console) Run() bool {
-	fmt.Fprintln(c.out, `Bombers server console — "help" for commands, "stop" to shut down.`)
 	scanner := bufio.NewScanner(c.in)
 	for {
 		fmt.Fprint(c.out, "bombers> ")
