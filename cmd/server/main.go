@@ -144,7 +144,7 @@ func main() {
 	// exiting or spinning.
 	stopped := false
 	if !*headless && console.Interactive(os.Stdin) {
-		stopped = console.New(pool, startedAt).Run()
+		stopped = console.New(pool, storage, startedAt).Run()
 		if !stopped {
 			log.Printf("console input ended; running headless (SIGINT/SIGTERM to stop)")
 		}

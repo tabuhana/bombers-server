@@ -20,7 +20,7 @@ func builtins() []command {
 	return []command{
 		{name: "help", help: "list available commands", run: runHelp},
 		{name: "users", help: "list registered users (username, id, created)", run: runUsers},
-		{name: "status", help: "uptime, DB ping, and row counts", run: runStatus},
+		{name: "status", help: "uptime, DB + media ping, and row counts", run: runStatus},
 		{name: "store", help: "list store-published nodes (id, name, version)", run: runStore},
 		{name: "publish", help: "publish <path> — put a {manifest, files} JSON bundle in the node store", run: runPublish},
 		{name: "unpublish", help: "unpublish <id> — remove a node from the store", run: runUnpublish},
@@ -65,14 +65,30 @@ func runUsers(ctx context.Context, c *Console, _ []string) error {
 
 func runStatus(ctx context.Context, c *Console, _ []string) error {
 	fmt.Fprintf(c.out, "  uptime:  %s\n", time.Since(c.startedAt).Round(time.Second))
-	if err := c.pool.Ping(ctx); err != nil {
-		fmt.Fprintf(c.out, "  db:      down (%v)\n", err)
+
+	dbErr := c.pool.Ping(ctx)
+	if dbErr != nil {
+		fmt.Fprintf(c.out, "  db:      down (%v)\n", dbErr)
+	} else {
+		fmt.Fprintln(c.out, "  db:      up")
+	}
+
+	// Object storage — informational, mirrors the /health "media" signal. It's
+	// independent of the DB, so it reports even when the DB is down.
+	if c.media == nil {
+		fmt.Fprintln(c.out, "  media:   n/a")
+	} else if err := c.media.Ping(ctx); err != nil {
+		fmt.Fprintf(c.out, "  media:   down (%v)\n", err)
+	} else {
+		fmt.Fprintln(c.out, "  media:   up")
+	}
+
+	// Row counts need the DB; skip just them (not the whole command) when it's
+	// down. Best-effort otherwise — one failing table (e.g. a migration not yet
+	// applied) shouldn't kill the rest of status.
+	if dbErr != nil {
 		return nil
 	}
-	fmt.Fprintln(c.out, "  db:      up")
-
-	// Row counts are best-effort color — one failing table (e.g. a migration
-	// not yet applied) shouldn't kill the rest of status.
 	for _, q := range []struct{ label, sql string }{
 		{"users", `SELECT COUNT(*) FROM users`},
 		{"friendships (accepted)", `SELECT COUNT(*) FROM friendships WHERE state = 'accepted'`},

@@ -28,10 +28,18 @@ const commandTimeout = 5 * time.Second
 // server down; it keeps the registry uniform (every command is just a run fn).
 var errStop = errors.New("stop requested")
 
+// objectStore is the narrow slice of the media storage the console needs: a
+// reachability probe for the `status` command. Keeping it an interface leaves
+// the console decoupled from the media package (and trivially stubbable).
+type objectStore interface {
+	Ping(ctx context.Context) error
+}
+
 // Console owns the interactive loop: a small registry of commands dispatched
 // over lines read from stdin.
 type Console struct {
 	pool      *pgxpool.Pool
+	media     objectStore
 	startedAt time.Time
 	in        io.Reader
 	out       io.Writer
@@ -45,9 +53,10 @@ type command struct {
 	run     func(ctx context.Context, c *Console, args []string) error
 }
 
-func New(pool *pgxpool.Pool, startedAt time.Time) *Console {
+func New(pool *pgxpool.Pool, media objectStore, startedAt time.Time) *Console {
 	return &Console{
 		pool:      pool,
+		media:     media,
 		startedAt: startedAt,
 		in:        os.Stdin,
 		out:       os.Stdout,
