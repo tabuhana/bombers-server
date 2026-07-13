@@ -42,10 +42,10 @@ var allowedContentTypes = map[string]bool{
 
 type Handler struct {
 	pool    *pgxpool.Pool
-	storage *Storage
+	storage Store
 }
 
-func NewHandler(pool *pgxpool.Pool, storage *Storage) *Handler {
+func NewHandler(pool *pgxpool.Pool, storage Store) *Handler {
 	return &Handler{pool: pool, storage: storage}
 }
 

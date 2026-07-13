@@ -79,7 +79,7 @@ After running `goose ... up`, connect with `psql` (or any client) and verify:
 ## Running
 
 ```bash
-go run ./cmd/server
+go run ./cmd/bombers
 ```
 
 You should see:
@@ -94,13 +94,13 @@ You can also override variables inline:
 
 ```powershell
 $env:PORT = "8080"
-go run ./cmd/server
+go run ./cmd/bombers
 ```
 
 **bash / zsh**
 
 ```bash
-PORT=8080 go run ./cmd/server
+PORT=8080 go run ./cmd/bombers
 ```
 
 ## Health check
@@ -112,6 +112,31 @@ curl http://localhost:1337/health
 ```
 
 Expected response: `{"status":"ok","db":"up","media":"up"}` (HTTP 200). If Postgres is unreachable you'll get `{"status":"degraded","db":"down",...}` (HTTP 503). The `media` field reports object-storage reachability and is informational — only the database governs the status/HTTP code.
+
+## Run it in the background (local self-host)
+
+Instead of holding a terminal open, register the server as a detached OS
+background service (Windows Service / systemd / launchd) so it starts on boot and
+survives logout. Build the binary first — the service points at it on disk, so a
+throwaway `go run` binary won't do — then configure once and install:
+
+```bash
+go build -o bombers ./cmd/bombers   # bombers.exe on Windows
+./bombers setup                     # pick data dir / DB / media, writes config.json
+./bombers service install           # register the service — run in an ADMIN / root shell
+./bombers service start             # start it now
+```
+
+Other actions: `bombers service status | stop | restart | uninstall`. `install`
+and `uninstall` touch the system service manager and need an elevated terminal —
+an **Administrator PowerShell** on Windows, or **sudo** on Linux/macOS. Run
+`bombers setup` first so the service boots from a complete config: a service has
+no terminal for the first-run wizard, so it will refuse to start until the config
+is complete.
+
+`bombers uninstall` is the full teardown: it deregisters the service, then —
+after a confirmation, or `--yes` for scripts — deletes the entire data directory
+(config.json, filesystem media, embedded-Postgres data + cached binaries).
 
 ## Build
 

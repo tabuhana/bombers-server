@@ -31,7 +31,7 @@ This document defines the server's *shape, contracts, and decisions*. Detailed e
 
 Self-hosting is first-class: run the same binary the official server runs, point the client at it from the login screen's server picker, and you have your own island (no federation — see above).
 
-**Requirements:** a PostgreSQL database and the Go binary (`go build ./cmd/server` or `go run ./cmd/server`). Apply migrations with goose (`goose -dir migrations postgres $DATABASE_URL up`).
+**Requirements:** a PostgreSQL database and the Go binary (`go build ./cmd/bombers` or `go run ./cmd/bombers`). Apply migrations with goose (`goose -dir migrations postgres $DATABASE_URL up`).
 
 **Environment variables** (a `.env` in the working directory is loaded automatically):
 

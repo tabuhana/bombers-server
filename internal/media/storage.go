@@ -18,9 +18,26 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// Store is the media byte-I/O seam. The handlers and /health depend on this
+// interface, not a concrete backend, so media bytes can live in S3-compatible
+// object storage (Storage, below) or on the local filesystem (FSStore) with no
+// handler change. The key scheme is server-constructed and identical across
+// backends: users/<userID>/<kind>.
+//
+// The store is dumb bytes: metadata (content type, size, updated_at) lives in
+// the user_media table, so the store never persists or returns a content type.
+// Put still takes one (the S3 backend records it as object metadata); backends
+// that don't need it ignore it. Get's missing-object signal is ErrObjectNotFound.
+type Store interface {
+	Put(ctx context.Context, userID, kind string, data []byte, contentType string) error
+	Get(ctx context.Context, userID, kind string) (io.ReadCloser, error)
+	Remove(ctx context.Context, userID, kind string) error
+	Ping(ctx context.Context) error
+}
+
 // Storage is the thin S3 wrapper the handlers use. It speaks the plain S3 API
 // via minio-go, so the same code points at local MinIO, MinIO-on-VPS, or R2 —
-// only the endpoint/credentials in config change.
+// only the endpoint/credentials in config change. It satisfies Store.
 type Storage struct {
 	client *minio.Client
 	bucket string

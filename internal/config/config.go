@@ -18,13 +18,30 @@ const (
 )
 
 type Config struct {
-	Port              string
-	DatabaseURL       string
+	// Host is the bind interface. Empty means all interfaces (":"+Port), which
+	// preserves the managed default; local mode may set 127.0.0.1 or 0.0.0.0.
+	Host        string
+	Port        string
+	DatabaseURL string
+
+	// DBBackend selects where Postgres comes from: "external" (default — a
+	// DATABASE_URL you provide, the managed path) or "embedded" (the server runs
+	// its own local Postgres, self-host). DATABASE_URL is required only for the
+	// external backend; the embedded backend supplies its own connection.
+	DBBackend string
+
 	TokenSecret       string
 	CorsAllowedOrigin string
 
+	// MediaBackend selects where media bytes live: "s3" (default — external/
+	// managed object storage) or "fs" (plain files on local disk, self-host).
+	// MediaDir is the filesystem root when the backend is "fs".
+	MediaBackend string
+	MediaDir     string
+
 	// S3-compatible object storage (profile media). Endpoint is host:port
-	// without a scheme; S3UseSSL selects http/https.
+	// without a scheme; S3UseSSL selects http/https. The access/secret keys are
+	// required only for the "s3" backend.
 	S3Endpoint  string
 	S3AccessKey string
 	S3SecretKey string
@@ -48,14 +65,44 @@ func Load() (*Config, error) {
 		return fallback
 	}
 
+	// DBBackend defaults to "external", preserving the managed path (a
+	// DATABASE_URL is required). "embedded" runs a local Postgres the server
+	// starts itself, which supplies the connection — so no DATABASE_URL is
+	// needed. requireDB marks DATABASE_URL required only for the external
+	// backend, mirroring requireS3 below.
+	dbBackend := optional("DB_BACKEND", "external")
+	requireDB := func(key string) string {
+		if dbBackend == "external" {
+			return require(key)
+		}
+		return os.Getenv(key)
+	}
+
+	// MediaBackend defaults to "s3", preserving the managed path (S3 creds
+	// required). "fs" stores media as local files and needs no S3 credentials.
+	mediaBackend := optional("MEDIA_BACKEND", "s3")
+	// requireS3 marks an S3 credential key required only when the S3 backend is
+	// actually selected, so a filesystem self-host user is never forced to
+	// invent S3 keys just to pass config validation.
+	requireS3 := func(key string) string {
+		if mediaBackend == "s3" {
+			return require(key)
+		}
+		return os.Getenv(key)
+	}
+
 	cfg := &Config{
+		Host:              optional("HOST", ""),
 		Port:              optional("PORT", defaultPort),
-		DatabaseURL:       require("DATABASE_URL"),
+		DatabaseURL:       requireDB("DATABASE_URL"),
+		DBBackend:         dbBackend,
 		TokenSecret:       require("TOKEN_SECRET"),
 		CorsAllowedOrigin: optional("CORS_ALLOWED_ORIGIN", defaultCorsAllowedOrigin),
+		MediaBackend:      mediaBackend,
+		MediaDir:          optional("MEDIA_DIR", ""),
 		S3Endpoint:        optional("S3_ENDPOINT", defaultS3Endpoint),
-		S3AccessKey:       require("S3_ACCESS_KEY"),
-		S3SecretKey:       require("S3_SECRET_KEY"),
+		S3AccessKey:       requireS3("S3_ACCESS_KEY"),
+		S3SecretKey:       requireS3("S3_SECRET_KEY"),
 		S3Bucket:          optional("S3_BUCKET", defaultS3Bucket),
 		S3UseSSL:          os.Getenv("S3_USE_SSL") == "true",
 	}
