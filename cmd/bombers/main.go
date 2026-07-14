@@ -102,6 +102,8 @@ func main() {
 		runSetup(rest)
 	case "doctor":
 		runDoctor(rest)
+	case "console":
+		runConsole(rest)
 	case "service":
 		runService(s, rest)
 	case "uninstall":
@@ -129,6 +131,7 @@ Commands:
   start      Run the server (the default when no command is given)
   setup      (Re)configure local self-host settings, then exit — does not serve
   doctor     Check the local setup for problems
+  console    Open the admin console against a running server (users, status, node store)
   service    Manage the OS background service (see actions below)
   uninstall  Remove the OS service and delete the local data directory
   version    Print the version and exit
@@ -159,6 +162,11 @@ start auto-detects the saved config and runs the first-run wizard when the
 config is incomplete; setup forces that wizard to reconfigure. A managed/cloud
 run stays pure-env: nothing is written to disk. Run "bombers setup" once before
 "bombers service install" so the service boots from a complete config.
+
+console connects to the SAME database a background/headless server (or the OS
+service) is using, so you can run admin commands against a server you started
+elsewhere. Leaving it with exit/quit/stop does NOT stop that server — it keeps
+serving; stop the server with "bombers service stop" or a signal to its process.
 `)
 }
 
@@ -887,6 +895,77 @@ func effectiveDBBackend(cfg *config.Config) string {
 		return cfg.DBBackend
 	}
 	return "external"
+}
+
+// runConsole opens the standalone admin console: it connects to the SAME
+// database a background/headless server (or the OS service) is already using and
+// runs the interactive `bombers>` panel against it. It is DB-connected, NOT an
+// attach to the server process — so its stop/exit/quit only LEAVE the console;
+// the background server keeps serving. It layers local self-host config under
+// the environment exactly like start/doctor, then dials the DB the running
+// server would (embedded URL vs external DATABASE_URL).
+func runConsole(_ []string) {
+	_ = godotenv.Load()
+	logx.Init()
+
+	// Layer the saved local config under the environment (best-effort, like
+	// doctor) so a self-host install resolves the same DB/media/bind the running
+	// server did. A managed/pure-env host simply has nothing to load here.
+	if dir, dirErr := setup.DataDir(); dirErr == nil {
+		if fc, ferr := setup.Load(dir); ferr == nil {
+			setup.EnsureSecret(fc)
+			fc.Apply()
+		}
+	}
+
+	// Unlike start/doctor, the console cannot run without config — it has nothing
+	// to connect to — so a config error is fatal here.
+	cfg, err := config.Load()
+	if err != nil {
+		logx.Fatal("%v", err)
+	}
+
+	// Pick the connection string the running server is answering on: the embedded
+	// backend always uses the fixed loopback URL (single source of truth in
+	// embeddedpg), external uses the configured DATABASE_URL.
+	connStr := cfg.DatabaseURL
+	if effectiveDBBackend(cfg) == "embedded" {
+		connStr = embeddedpg.ConnString()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pool, err := store.NewPool(ctx, connStr)
+	cancel()
+	if err != nil {
+		logx.Fatal("cannot reach the database — is the server running? %v", err)
+	}
+	defer pool.Close()
+
+	// Open the media store best-effort, only so `status` can ping it. A nil store
+	// is fine — the console's status prints "media: n/a" for a nil media. Assign
+	// storage ONLY from a successful open: NewFSStore/NewStorage return a typed nil
+	// pointer on error, and stuffing that into the media.Store interface would make
+	// it non-nil (so status's `== nil` check fails and Ping panics). Leaving the
+	// interface untouched on error keeps it a true nil.
+	var storage media.Store
+	if cfg.MediaBackend == "fs" {
+		if fs, ferr := media.NewFSStore(cfg.MediaDir); ferr == nil {
+			storage = fs
+		}
+	} else {
+		mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if s3, serr := media.NewStorage(mctx, cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL); serr == nil {
+			storage = s3
+		}
+		mcancel()
+	}
+
+	fmt.Println("Bombers admin console — connected. Type \"help\", or \"exit\" to leave (the server keeps running).")
+
+	// Zero start time → status reports uptime as "n/a (console session)" (no real
+	// process uptime here). Ignore the returned bool: stop/exit/quit all just leave
+	// the console — none of them can stop the separately-running server.
+	console.New(pool, storage, time.Time{}, cfg.Host, cfg.Port).Run()
 }
 
 func healthHandler(pool *pgxpool.Pool, storage media.Store) http.HandlerFunc {

@@ -295,6 +295,17 @@ be driven headless here, so its prompts get a human run-through as they land.
 > launch on a clean bill of health. It starts nothing (embedded Postgres/MinIO are
 > left for `start`).
 
+> **Companion — `bombers console`.** Once the server runs detached (`--headless`
+> or the OS service, §P5), `bombers console` opens the same interactive `bombers>`
+> admin panel **against that running server** by connecting to the **same
+> database** it uses — a separate process, DB-connected, **not** an attach to the
+> server process. It resolves config the way `start` does (local-config layer under
+> env → `config.Load`) and dials the embedded-Postgres URL or your external
+> `DATABASE_URL` automatically. Run the usual admin commands (users / status /
+> address / node-store publish) live; because it is DB-connected it **cannot** stop
+> the server — `exit` / `quit` / `stop` just leave the console and the server keeps
+> serving (stop that with `bombers service stop` or a signal to its process).
+
 ---
 
 ## 12. Decisions

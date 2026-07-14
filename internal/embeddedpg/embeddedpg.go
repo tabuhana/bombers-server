@@ -39,6 +39,15 @@ type Instance struct {
 	pg *embeddedpostgres.EmbeddedPostgres
 }
 
+// ConnString is the single source of truth for the embedded Postgres URL: the
+// fixed loopback host, the Bombers-specific port, and the fixed local
+// credentials, all from this package's consts. Start returns it, and the
+// standalone `bombers console` uses it to reach a running server's embedded
+// database without re-deriving the string (both must agree — hence one func).
+func ConnString() string {
+	return fmt.Sprintf("postgres://%s:%s@127.0.0.1:%d/%s?sslmode=disable", user, password, port, database)
+}
+
 // Start configures and boots a local Postgres under <dataDir>/pg, returning the
 // running instance and the connection string the app pool + migrations use.
 // Everything it needs is contained under that one directory:
@@ -92,7 +101,7 @@ func Start(dataDir string) (*Instance, string, error) {
 	if err := pg.Start(); err != nil {
 		return nil, "", fmt.Errorf("start embedded postgres: %w", err)
 	}
-	connStr := fmt.Sprintf("postgres://%s:%s@127.0.0.1:%d/%s?sslmode=disable", user, password, port, database)
+	connStr := ConnString()
 	logx.Info("embedded Postgres listening on 127.0.0.1:%d", port)
 
 	return &Instance{pg: pg}, connStr, nil

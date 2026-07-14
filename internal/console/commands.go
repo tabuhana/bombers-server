@@ -76,7 +76,14 @@ func runAddress(_ context.Context, c *Console, _ []string) error {
 }
 
 func runStatus(ctx context.Context, c *Console, _ []string) error {
-	fmt.Fprintf(c.out, "  uptime:  %s\n", time.Since(c.startedAt).Round(time.Second))
+	// A zero start time means a standalone `bombers console` session (it connects
+	// to the DB of a separately-running server), so there is no meaningful process
+	// uptime to report — the in-process console passes the real server start time.
+	if c.startedAt.IsZero() {
+		fmt.Fprintln(c.out, "  uptime:  n/a (console session)")
+	} else {
+		fmt.Fprintf(c.out, "  uptime:  %s\n", time.Since(c.startedAt).Round(time.Second))
+	}
 	fmt.Fprintf(c.out, "  address: %s\n", strings.Join(ReachableURLs(c.host, c.port), "  "))
 
 	dbErr := c.pool.Ping(ctx)
