@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -41,6 +42,8 @@ type Console struct {
 	pool      *pgxpool.Pool
 	media     objectStore
 	startedAt time.Time
+	host      string
+	port      string
 	in        io.Reader
 	out       io.Writer
 	commands  []command
@@ -53,15 +56,43 @@ type command struct {
 	run     func(ctx context.Context, c *Console, args []string) error
 }
 
-func New(pool *pgxpool.Pool, media objectStore, startedAt time.Time) *Console {
+func New(pool *pgxpool.Pool, media objectStore, startedAt time.Time, host, port string) *Console {
 	return &Console{
 		pool:      pool,
 		media:     media,
 		startedAt: startedAt,
+		host:      host,
+		port:      port,
 		in:        os.Stdin,
 		out:       os.Stdout,
 		commands:  builtins(),
 	}
+}
+
+// ReachableURLs lists the base URLs this server answers on, given its bind host
+// and port. A wildcard bind ("" or 0.0.0.0 / ::) is expanded to localhost plus
+// every non-loopback IPv4 the machine has — so a LAN self-hoster sees the exact
+// address to hand a client — while a concrete host is returned as-is. Shared by
+// the startup log and the console `address` command.
+func ReachableURLs(host, port string) []string {
+	if host != "" && host != "0.0.0.0" && host != "::" {
+		return []string{fmt.Sprintf("http://%s:%s", host, port)}
+	}
+	urls := []string{fmt.Sprintf("http://localhost:%s", port)}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return urls
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+		if ip4 := ipnet.IP.To4(); ip4 != nil {
+			urls = append(urls, fmt.Sprintf("http://%s:%s", ip4, port))
+		}
+	}
+	return urls
 }
 
 // Interactive reports whether f looks like an interactive terminal (a

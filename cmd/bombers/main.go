@@ -167,6 +167,8 @@ type app struct {
 	storage   media.Store
 	epg       *embeddedpg.Instance
 	startedAt time.Time
+	host      string
+	port      string
 }
 
 // buildAndServe layers any local self-host config UNDER the environment (a
@@ -387,6 +389,11 @@ func buildAndServe() (*app, error) {
 	// its prompt — otherwise this fires from the serve goroutine a beat later and
 	// lands on the "bombers> " line, eating the prompt.
 	logx.Info("http listening on %s", srv.Addr)
+	// Show the actual URL(s) a client can reach this on — for a LAN bind that's
+	// each of the machine's IPs, which is what a self-hoster hands the client.
+	for _, u := range console.ReachableURLs(cfg.Host, cfg.Port) {
+		logx.Info("reachable at %s", u)
+	}
 	go func() {
 		// A serve error at startup (e.g. port in use) is fatal in both modes;
 		// ErrServerClosed is the normal graceful-shutdown exit.
@@ -395,7 +402,7 @@ func buildAndServe() (*app, error) {
 		}
 	}()
 
-	return &app{srv: srv, pool: pool, storage: storage, epg: epg, startedAt: startedAt}, nil
+	return &app{srv: srv, pool: pool, storage: storage, epg: epg, startedAt: startedAt, host: cfg.Host, port: cfg.Port}, nil
 }
 
 // shutdown performs the graceful teardown in the fixed order the server has
@@ -460,7 +467,7 @@ func runStart(args []string) {
 	stopped := false
 	if !*headless && console.Interactive(os.Stdin) {
 		logx.Info(`console ready — type "help", "stop" to quit`)
-		stopped = console.New(a.pool, a.storage, a.startedAt).Run()
+		stopped = console.New(a.pool, a.storage, a.startedAt, a.host, a.port).Run()
 		if !stopped {
 			logx.Warn("console input ended; running headless (SIGINT/SIGTERM to stop)")
 		}

@@ -22,6 +22,7 @@ func builtins() []command {
 		{name: "help", help: "list available commands", run: runHelp},
 		{name: "users", help: "list registered users (username, id, created)", run: runUsers},
 		{name: "status", help: "uptime, DB + media ping, and row counts", run: runStatus},
+		{name: "address", aliases: []string{"addr", "url"}, help: "the URL(s) this server is reachable at (hand one to a client)", run: runAddress},
 		{name: "logtime", help: "show or set the log timestamp format (time|datetime|iso)", run: runLogtime},
 		{name: "store", help: "list store-published nodes (id, name, version)", run: runStore},
 		{name: "publish", help: "publish <path> — put a {manifest, files} JSON bundle in the node store", run: runPublish},
@@ -65,8 +66,18 @@ func runUsers(ctx context.Context, c *Console, _ []string) error {
 	return nil
 }
 
+// runAddress prints the base URL(s) this server is reachable at — the thing a LAN
+// self-hoster needs to point a client at it (the machine's IP, not just the bind).
+func runAddress(_ context.Context, c *Console, _ []string) error {
+	for _, u := range ReachableURLs(c.host, c.port) {
+		fmt.Fprintf(c.out, "  %s\n", u)
+	}
+	return nil
+}
+
 func runStatus(ctx context.Context, c *Console, _ []string) error {
 	fmt.Fprintf(c.out, "  uptime:  %s\n", time.Since(c.startedAt).Round(time.Second))
+	fmt.Fprintf(c.out, "  address: %s\n", strings.Join(ReachableURLs(c.host, c.port), "  "))
 
 	dbErr := c.pool.Ping(ctx)
 	if dbErr != nil {
