@@ -285,6 +285,16 @@ be driven headless here, so its prompts get a human run-through as they land.
   download-and-install. (Service-stopping any embedded **MinIO** is moot until the
   P4 pick above exists; embedded **Postgres** is stopped today.)
 
+> **Companion — `bombers doctor`.** A non-destructive diagnostics command that
+> resolves config the way `start` does (the local-config layer under env, then
+> `config.Load`) but **never fatals**, then runs a checklist — data dir writable,
+> config complete, build arch vs. embedded-PG (a 386 build can't run embedded
+> Postgres), port free, external DB reachable, media writable/reachable — printing
+> one ASCII-marked line each (`[ ok ]` / `[FAIL]` / `[warn]` / `[skip]`) and
+> exiting non-zero if anything FAILed, so `bombers doctor && bombers start` gates a
+> launch on a clean bill of health. It starts nothing (embedded Postgres/MinIO are
+> left for `start`).
+
 ---
 
 ## 12. Decisions

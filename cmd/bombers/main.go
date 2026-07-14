@@ -7,10 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -98,6 +100,8 @@ func main() {
 		runStart(rest)
 	case "setup":
 		runSetup(rest)
+	case "doctor":
+		runDoctor(rest)
 	case "service":
 		runService(s, rest)
 	case "uninstall":
@@ -124,6 +128,7 @@ Usage:
 Commands:
   start      Run the server (the default when no command is given)
   setup      (Re)configure local self-host settings, then exit — does not serve
+  doctor     Check the local setup for problems
   service    Manage the OS background service (see actions below)
   uninstall  Remove the OS service and delete the local data directory
   version    Print the version and exit
@@ -663,7 +668,225 @@ func runSetup(_ []string) {
 	if err := fc.Save(dir); err != nil {
 		logx.Fatal("saving local config: %v", err)
 	}
-	fmt.Printf("Configuration saved to %s. Run `bombers start` to launch.\n", filepath.Join(dir, "config.json"))
+	printSetupSummary(fc, dir)
+}
+
+// printSetupSummary prints the "Setup complete!" recap after the wizard saves,
+// straight to stdout via fmt (not logx — this is a user-facing report, not a log
+// line). It restates where each piece landed (config file, database, media),
+// the URL(s) the server will answer on, and the next commands to run. Modeled on
+// the Hermes setup-complete screen: plain, aligned, skimmable.
+func printSetupSummary(fc *setup.FileConfig, dir string) {
+	dbLine := "external → " + fc.DatabaseURL
+	if fc.DBBackend == "embedded" {
+		dbLine = "embedded Postgres → " + filepath.Join(dir, "pg")
+	}
+
+	mediaLine := "S3/MinIO → " + fc.S3Endpoint
+	if fc.MediaBackend == "fs" {
+		mediaDir := fc.MediaDir
+		if mediaDir == "" {
+			mediaDir = filepath.Join(dir, "media")
+		}
+		mediaLine = "local files → " + mediaDir
+	}
+
+	fmt.Println()
+	fmt.Println("✔ Setup complete!")
+	fmt.Println()
+	fmt.Println("Your files:")
+	fmt.Printf("  %-10s%s\n", "Config:", filepath.Join(dir, "config.json"))
+	fmt.Printf("  %-10s%s\n", "Database:", dbLine)
+	fmt.Printf("  %-10s%s\n", "Media:", mediaLine)
+	fmt.Println()
+	fmt.Println("Reachable at:")
+	for _, u := range console.ReachableURLs(fc.Host, fc.Port) {
+		fmt.Printf("  %s\n", u)
+	}
+	fmt.Println()
+	fmt.Println("Next:")
+	fmt.Printf("  %-16s%s\n", "bombers start", "run the server")
+	fmt.Printf("  %-16s%s\n", "bombers doctor", "check for issues")
+	fmt.Printf("  %-16s%s\n", "bombers setup", "re-run this wizard")
+	fmt.Println()
+}
+
+// Doctor status markers — fixed-width and ASCII-safe so the checklist stays
+// aligned in any terminal and survives piping/redirection (no color, no
+// Unicode). Every check prints exactly one of these.
+const (
+	markOK   = "[ ok ]"
+	markFAIL = "[FAIL]"
+	markWarn = "[warn]"
+	markSkip = "[skip]"
+)
+
+// runDoctor diagnoses a local self-host install without starting anything. It
+// resolves configuration the same way `start` does — layer the saved local
+// config UNDER the environment, then config.Load — but NEVER fatals: every step
+// is best-effort and every check prints a single status line. It exits 1 when
+// any check FAILs (so `bombers doctor && bombers start` gates a launch on a
+// clean bill of health); warnings and skips alone never fail.
+func runDoctor(_ []string) {
+	_ = godotenv.Load()
+	logx.Init()
+
+	// Layer the saved local config under the environment exactly like
+	// buildAndServe, but tolerate every failure — doctor reports problems, it
+	// doesn't die on them. A managed/pure-env host simply has nothing to load.
+	dir, dirErr := setup.DataDir()
+	if dirErr == nil {
+		if fc, ferr := setup.Load(dir); ferr == nil {
+			setup.EnsureSecret(fc)
+			fc.Apply()
+		}
+	}
+
+	cfg, cfgErr := config.Load()
+
+	var okCount, failCount int
+	mark := func(status, name, msg string) {
+		fmt.Printf("%s  %-14s  %s\n", status, name, msg)
+		switch status {
+		case markOK:
+			okCount++
+		case markFAIL:
+			failCount++
+		}
+	}
+
+	fmt.Println("Bombers doctor — checking your local setup")
+	fmt.Println()
+
+	// 1. Data directory resolves and is writable (create + remove a temp file).
+	if dirErr != nil {
+		mark(markFAIL, "Data directory", fmt.Sprintf("cannot resolve: %v", dirErr))
+	} else if err := os.MkdirAll(dir, 0o755); err != nil {
+		mark(markFAIL, "Data directory", fmt.Sprintf("cannot create %s: %v", dir, err))
+	} else if f, err := os.CreateTemp(dir, ".doctor-*"); err != nil {
+		mark(markFAIL, "Data directory", fmt.Sprintf("%s is not writable: %v", dir, err))
+	} else {
+		tmp := f.Name()
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		mark(markOK, "Data directory", fmt.Sprintf("writable: %s", dir))
+	}
+
+	// 2. Configuration loads (all required env/file vars are satisfiable).
+	if cfgErr != nil {
+		mark(markFAIL, "Configuration", cfgErr.Error())
+	} else {
+		mark(markOK, "Configuration", "all required settings present")
+	}
+
+	// 3. Build architecture vs. the effective DB backend: embedded Postgres has
+	// no 32-bit (386) binary upstream, so a 386 build can never run it.
+	dbBackend := effectiveDBBackend(cfg)
+	switch {
+	case dbBackend == "embedded" && runtime.GOARCH == "386":
+		mark(markFAIL, "Architecture", "embedded Postgres needs a 64-bit build (this is 32-bit); rebuild with `GOARCH=amd64 go build`, or use external Postgres.")
+	case dbBackend == "embedded":
+		mark(markOK, "Architecture", fmt.Sprintf("64-bit (%s) — embedded Postgres supported", runtime.GOARCH))
+	default:
+		mark(markSkip, "Architecture", "external database — no architecture constraint")
+	}
+
+	// 4. Port is bindable right now (a rough "is the server already running?"
+	// probe): listen, then immediately close on success.
+	if cfg == nil {
+		mark(markSkip, "Port", "config didn't load")
+	} else {
+		addr := cfg.Host + ":" + cfg.Port
+		if ln, err := net.Listen("tcp", addr); err != nil {
+			mark(markFAIL, "Port", fmt.Sprintf("cannot bind %s: %v (already in use?)", addr, err))
+		} else {
+			_ = ln.Close()
+			mark(markOK, "Port", fmt.Sprintf("%s is free", addr))
+		}
+	}
+
+	// 5. Database reachability. External is dialed here (short ctx, ping, close);
+	// embedded is not started by doctor — it comes up with `bombers start`.
+	switch {
+	case dbBackend == "embedded":
+		mark(markSkip, "Database", "embedded — starts with `bombers start`")
+	case cfg == nil:
+		mark(markSkip, "Database", "config didn't load")
+	default:
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		pool, err := store.NewPool(ctx, cfg.DatabaseURL)
+		if err != nil {
+			cancel()
+			mark(markFAIL, "Database", fmt.Sprintf("cannot connect: %v", err))
+		} else {
+			perr := pool.Ping(ctx)
+			cancel()
+			pool.Close()
+			if perr != nil {
+				mark(markFAIL, "Database", fmt.Sprintf("ping failed: %v", perr))
+			} else {
+				mark(markOK, "Database", "reachable")
+			}
+		}
+	}
+
+	// 6. Media backend: a filesystem root must be creatable/writable; an S3/MinIO
+	// backend must answer a reachability probe.
+	switch {
+	case cfg == nil:
+		mark(markSkip, "Media", "config didn't load")
+	case cfg.MediaBackend == "fs":
+		mediaDir := cfg.MediaDir
+		if mediaDir == "" && dir != "" {
+			mediaDir = filepath.Join(dir, "media")
+		}
+		if mediaDir == "" {
+			mark(markSkip, "Media", "no media directory resolved")
+		} else if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+			mark(markFAIL, "Media", fmt.Sprintf("cannot create %s: %v", mediaDir, err))
+		} else if f, err := os.CreateTemp(mediaDir, ".doctor-*"); err != nil {
+			mark(markFAIL, "Media", fmt.Sprintf("%s is not writable: %v", mediaDir, err))
+		} else {
+			tmp := f.Name()
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			mark(markOK, "Media", fmt.Sprintf("filesystem writable: %s", mediaDir))
+		}
+	default:
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		storage, err := media.NewStorage(ctx, cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
+		if err != nil {
+			cancel()
+			mark(markFAIL, "Media", fmt.Sprintf("S3/MinIO unreachable: %v", err))
+		} else {
+			perr := storage.Ping(ctx)
+			cancel()
+			if perr != nil {
+				mark(markFAIL, "Media", fmt.Sprintf("S3/MinIO ping failed: %v", perr))
+			} else {
+				mark(markOK, "Media", fmt.Sprintf("S3/MinIO reachable: %s", cfg.S3Endpoint))
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("%d checks OK, %d issue(s)\n", okCount, failCount)
+	if failCount > 0 {
+		os.Exit(1)
+	}
+}
+
+// effectiveDBBackend resolves which database backend doctor should test: an
+// explicit DB_BACKEND env var wins, then the loaded config's value, then the
+// managed default ("external"). Safe on a nil cfg (config.Load failed).
+func effectiveDBBackend(cfg *config.Config) string {
+	if b := os.Getenv("DB_BACKEND"); b != "" {
+		return b
+	}
+	if cfg != nil && cfg.DBBackend != "" {
+		return cfg.DBBackend
+	}
+	return "external"
 }
 
 func healthHandler(pool *pgxpool.Pool, storage media.Store) http.HandlerFunc {

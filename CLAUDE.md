@@ -74,9 +74,10 @@ Each `internal/<domain>` owns its own routes, logic, and queries (typical files:
 
 Standard Go workflow (no `Makefile`):
 
-The binary is a `bombers <command>` CLI (`start` / `setup` / `service` /
-`uninstall` / `version` / `help`). A bare invocation defaults to `start`, so the
-old no-subcommand behavior is preserved. `service` runs the binary as a detached
+The binary is a `bombers <command>` CLI (`start` / `setup` / `doctor` /
+`service` / `uninstall` / `version` / `help`). A bare invocation defaults to
+`start`, so the old no-subcommand behavior is preserved. `service` runs the
+binary as a detached
 OS background service (Windows Service / systemd / launchd) via the
 `github.com/kardianos/service` dep; `uninstall` is the full local teardown. The
 serve logic is shared by the CLI and the service through `buildAndServe()` +
@@ -91,6 +92,7 @@ go run ./cmd/bombers                    # run the server (needs DATABASE_URL + T
 go run ./cmd/bombers start --headless   # daemon mode: no console, stops on SIGINT/SIGTERM
                                         # (bare `go run ./cmd/bombers --headless` still works)
 go run ./cmd/bombers setup              # (re)configure local self-host, then exit (does not serve)
+go run ./cmd/bombers doctor             # check the local setup for problems (never serves); exits 1 on any failure
 go run ./cmd/bombers service install    # register as an OS background service (needs an ADMIN/root shell)
 go run ./cmd/bombers service start      # also: stop / restart / status / uninstall the service
 go run ./cmd/bombers uninstall          # remove the service + delete the data dir (--yes skips the confirm)
