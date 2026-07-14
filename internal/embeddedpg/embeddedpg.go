@@ -11,9 +11,14 @@ package embeddedpg
 
 import (
 	"fmt"
+	"net"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 
@@ -48,6 +53,41 @@ func ConnString() string {
 	return fmt.Sprintf("postgres://%s:%s@127.0.0.1:%d/%s?sslmode=disable", user, password, port, database)
 }
 
+// stopStalePostgres clears a leftover embedded Postgres left running by a
+// previous run that didn't shut down cleanly (e.g. the terminal was closed,
+// which orphans the child process and leaves it holding the port). It acts ONLY
+// when our port is actually taken — so a stale postmaster.pid whose process is
+// long gone is ignored and Start just proceeds. When the port IS held, it reads
+// the postmaster.pid in our own data dir (so the PID is almost certainly our
+// leftover Postgres), signals it to stop, and waits a moment for the port to free
+// up. Best-effort throughout: on any doubt it does nothing and lets Start's own
+// port check report the problem as before.
+func stopStalePostgres(base string) {
+	// Nothing to clean unless something is actually holding our port.
+	if ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port)); err == nil {
+		_ = ln.Close()
+		return
+	}
+	raw, err := os.ReadFile(filepath.Join(base, "data", "postmaster.pid"))
+	if err != nil {
+		return // no pid file to consult — leave it to Start's port check
+	}
+	first := strings.TrimSpace(strings.SplitN(strings.TrimSpace(string(raw)), "\n", 2)[0])
+	pid, err := strconv.Atoi(first)
+	if err != nil || pid <= 0 {
+		return
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	logx.Warn("a previous embedded Postgres (pid %d) is still holding port %d from an unclean shutdown — stopping it", pid, port)
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		_ = proc.Kill() // SIGTERM not deliverable (e.g. a stale/reused PID, or Windows) — force it
+	}
+	time.Sleep(1500 * time.Millisecond) // give Postgres a moment to release the port
+}
+
 // Start configures and boots a local Postgres under <dataDir>/pg, returning the
 // running instance and the connection string the app pool + migrations use.
 // Everything it needs is contained under that one directory:
@@ -71,6 +111,11 @@ func Start(dataDir string) (*Instance, string, error) {
 	}
 
 	base := filepath.Join(dataDir, "pg")
+
+	// Self-heal: clear a leftover Postgres from a previous run that didn't shut
+	// down cleanly, so `bombers start` recovers instead of failing on "port
+	// already in use".
+	stopStalePostgres(base)
 
 	cfg := embeddedpostgres.DefaultConfig().
 		// Pin a specific major (Postgres 16) so the data directory format is
@@ -125,8 +170,17 @@ type logWriter struct{}
 
 func (logWriter) Write(p []byte) (int, error) {
 	for line := range strings.SplitSeq(strings.TrimRight(string(p), "\n"), "\n") {
-		if s := strings.TrimSpace(line); s != "" {
-			logx.Info("postgres: %s", s)
+		s := strings.TrimSpace(line)
+		if s == "" {
+			continue
+		}
+		// Postgres is chatty at startup (LOG: checkpoints, autovacuum, "ready to
+		// accept connections", …). That routine noise clutters the server's log for
+		// no benefit — bombers logs its own "listening" line — so forward only the
+		// lines that flag a real problem and drop the rest.
+		if strings.Contains(s, "WARNING") || strings.Contains(s, "ERROR") ||
+			strings.Contains(s, "FATAL") || strings.Contains(s, "PANIC") {
+			logx.Warn("postgres: %s", s)
 		}
 	}
 	return len(p), nil
