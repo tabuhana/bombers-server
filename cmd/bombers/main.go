@@ -64,10 +64,12 @@ func main() {
 		}
 	}
 
-	// The command is the first non-flag word; consume it. Otherwise (no args, or
-	// a leading flag) default to `start` so `bombers` and `bombers --headless`
-	// still launch the server exactly as before.
-	cmd := "start"
+	// The command is the first non-flag word; consume it. A bare `bombers` opens
+	// the ADMIN CONSOLE against a running server — the thing you reach for most
+	// often once it's installed. Starting is `bombers start`, and it's the
+	// service manager (which launches us with no arguments at all) that's
+	// handled separately, below.
+	cmd := "console"
 	rest := args
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		cmd = args[0]
@@ -85,20 +87,20 @@ func main() {
 		logx.Fatal("configuring OS service: %v", serr)
 	}
 
+	// An SCM/systemd launch passes no arguments, so it must be recognised BEFORE
+	// the bare-command default is applied — otherwise the service manager would
+	// start an admin console instead of a server. Only the service manager makes
+	// us non-interactive in this sense (per kardianos).
+	if !svc.Interactive() {
+		if err := s.Run(); err != nil {
+			logx.Init()
+			logx.Error("service run: %v", err)
+		}
+		return
+	}
+
 	switch cmd {
 	case "start":
-		// Route by how we were launched. Only the OS service manager starts us
-		// non-interactively (per kardianos), and that process runs through
-		// s.Run(), which drives program.Start/Stop headlessly. A human terminal —
-		// including `start --headless` — stays on the original interactive CLI
-		// path below, byte-for-byte unchanged.
-		if !svc.Interactive() {
-			if err := s.Run(); err != nil {
-				logx.Init()
-				logx.Error("service run: %v", err)
-			}
-			return
-		}
 		runStart(rest)
 	case "setup":
 		runSetup(rest)
@@ -108,6 +110,8 @@ func main() {
 		runMigrate(rest)
 	case "update":
 		runUpdate(rest)
+	case "install":
+		runInstall(rest)
 	case "stop":
 		runStop(rest)
 	case "status":
@@ -140,14 +144,16 @@ Usage:
   bombers [command] [flags]
 
 Commands:
-  start      Run the server in the BACKGROUND (the default when no command is given)
+  (none)     Open the admin console against the running server
+  install    Build + put bombers on your PATH. Run once, from your checkout
+  start      Run the server in the background
   stop       Stop the background server
   status     Is the background server running, and where are its logs
   logs       Print the tail of the background server's log (logs [lines])
-  setup      (Re)configure local self-host settings, then exit — does not serve
+  setup      Configure the database + media and migrate — re-run any time to change it
   doctor     Check the local setup for problems
   migrate    Apply pending database migrations, then exit — does not serve
-  update     After pulling + rebuilding: migrate the database, then exit — does not serve
+  update     After a git pull: rebuild and migrate — does not serve
   console    Open the admin console against a running server (users, status, node store)
   service    Manage the OS background service (see actions below)
   uninstall  Remove the OS service and delete the local data directory
@@ -765,6 +771,13 @@ func runSetup(_ []string) {
 	if err := fc.Save(dir); err != nil {
 		logx.Fatal("saving local config: %v", err)
 	}
+
+	// Now that we know WHERE the database is, bring the schema up. This is the
+	// only migration a first-time install needs; later ones come with new code
+	// via `bombers update`.
+	fc.Apply()
+	migrateNow()
+
 	printSetupSummary(fc, dir)
 }
 

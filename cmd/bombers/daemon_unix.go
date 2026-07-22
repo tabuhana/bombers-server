@@ -24,3 +24,6 @@ func processAlive(pid int) bool {
 func signalStop(pid int) error {
 	return syscall.Kill(pid, syscall.SIGTERM)
 }
+
+// isWindows reports the build target, for the installed binary's filename.
+func isWindows() bool { return false }

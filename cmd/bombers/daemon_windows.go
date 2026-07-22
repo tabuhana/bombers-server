@@ -42,3 +42,6 @@ func signalStop(pid int) error {
 	}
 	return p.Kill()
 }
+
+// isWindows reports the build target, for the installed binary's filename.
+func isWindows() bool { return true }

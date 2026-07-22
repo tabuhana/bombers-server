@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -28,6 +30,31 @@ func runUpdate(_ []string) {
 	loadEnvAndConfig()
 	logx.Init()
 
+	// Rebuild from the checkout recorded at install time, so `bombers update`
+	// works from any directory. Then hand the migration to the NEW binary: the
+	// migrations are embedded in it, so the copy currently running has no idea
+	// the new one exists.
+	if rec, rerr := loadInstallRecord(); rerr == nil {
+		if err := buildInto(rec.Source, rec.Binary); err != nil {
+			logx.Fatal("update: %v", err)
+		}
+		logx.Info("update: rebuilt %s", rec.Binary)
+		cmd := exec.Command(rec.Binary, "migrate")
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	logx.Warn("update: no install record — migrating with this binary only (run `bombers install` to enable rebuilds)")
+
+	migrateNow()
+}
+
+// migrateNow brings the schema up to date, starting the server's own Postgres
+// first when that's the backend (nothing is listening between server runs, so a
+// plain migrate would have nothing to connect to) and stopping it after.
+func migrateNow() {
 	cfg, err := config.Load()
 	if err != nil {
 		logx.Fatal("config: %v", err)

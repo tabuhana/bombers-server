@@ -76,28 +76,45 @@ Each `internal/<domain>` owns its own routes, logic, and queries (typical files:
 
 Standard Go workflow (no `Makefile`):
 
-The binary is a `bombers <command>` CLI (`start` / `stop` / `status` / `logs` /
-`setup` / `doctor` / `migrate` / `update` / `console` / `service` / `uninstall` /
-`version` / `help`). A bare invocation defaults to `start`.
+The binary is a `bombers <command>` CLI. **The whole self-hosted flow is five
+commands and never mentions Go or goose:**
 
-**`start` runs in the BACKGROUND by default** — the binary daemonises itself (no
-systemd, no root): it re-execs detached with output redirected to
-`<dataDir>/server.log`, records `<dataDir>/server.pid`, waits ~1.5s to confirm
-the child is still alive (a dead child prints its log tail and exits 1 rather
-than falsely reporting success), and returns your prompt. `bombers stop` sends
-SIGTERM and waits for a graceful shutdown; `bombers status` reports running/pid/
-log path; `bombers logs [n]` tails it; `bombers console` opens the admin prompt
-against it. `start --foreground` keeps the old attached behaviour with the
-interactive console, and `--headless` drops the console. The `service`
-subcommands remain the heavier option for when the OS should own the process
-(start on boot, restart on failure). `service` runs the
-binary as a detached
-OS background service (Windows Service / systemd / launchd) via the
-`github.com/kardianos/service` dep; `uninstall` is the full local teardown. The
-serve logic is shared by the CLI and the service through `buildAndServe()` +
-`(*app) shutdown()` in `cmd/bombers/main.go`; an SCM-launched process is detected
-via `service.Interactive()` (no marker flag) and runs headless through `s.Run()`,
-while a terminal keeps the interactive `bombers>` console.
+```bash
+./bombers install    # once, from a fresh clone: builds + puts `bombers` on your PATH
+bombers setup        # configure database + media, and migrate. Re-run to change config
+bombers start        # run in the background
+bombers              # the admin console against it (exiting leaves it running)
+bombers stop         # stop it
+```
+
+`./bombers` in the repo root is a **launcher script**: it compiles the server if
+the binary is missing or stale, then execs it — which is why a fresh clone needs
+no `go build`. After `install`, it's out of the picture.
+
+- **`install`** — builds from the checkout, installs to `/usr/local/bin` when
+  that's writable (a container running as root) else `~/.local/bin` (never sudo;
+  prints the PATH line if that directory isn't on it), and records the source +
+  binary paths in `<dataDir>/install.json` so `update` works from any directory.
+  It configures nothing and touches no database — that's `setup`'s job, kept
+  separate so reconfiguring never means reinstalling.
+- **`setup`** — the config wizard, then migrates (it now knows where the database
+  is). This is the only migration a first install needs.
+- **`update`** — after a `git pull`: rebuilds from the recorded source, replaces
+  the installed binary, then runs the NEW binary's `migrate` as a child process.
+  That handoff is required, not decoration: migrations are embedded in the
+  binary, so the running copy has no idea a new one exists.
+- **`start`** backgrounds itself at a terminal (pidfile + `server.log` in the data
+  dir; `stop` / `status` / `logs` manage it) and stays in the FOREGROUND when
+  stdout isn't a terminal, which is what makes it correct under systemd and in a
+  container. `start --foreground` forces the attached path.
+- **A bare `bombers`** opens the admin console. A service-manager launch passes no
+  arguments either, so that case is detected BEFORE the bare default is applied —
+  otherwise systemd would start a console instead of a server.
+- `service` (systemd/launchd/Windows Service) remains for start-on-boot and
+  restart-on-failure; it is no longer needed just to run in the background.
+
+Underneath, the plumbing commands still exist: `migrate`, `doctor`, `console`,
+`version`, `uninstall`.
 
 ```powershell
 go build ./...                          # compile everything (binary: bombers)

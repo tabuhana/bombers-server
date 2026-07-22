@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# The bombers launcher — so a fresh clone needs exactly one command:
+#
+#     ./bombers install
+#
+# It compiles the server if the binary is missing or out of date, then runs it
+# with whatever you asked for. You never type `go`. After `install` puts bombers
+# on your PATH, this script is out of the picture: you just type `bombers`.
+set -e
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+bin="$here/bin/bombers"
+
+needs_build=0
+if [ ! -x "$bin" ]; then
+  needs_build=1
+elif [ -n "$(find "$here/cmd" "$here/internal" "$here/migrations" -name '*.go' -newer "$bin" -print -quit 2>/dev/null)" ]; then
+  needs_build=1
+elif [ "$here/go.mod" -nt "$bin" ]; then
+  needs_build=1
+fi
+
+if [ "$needs_build" -eq 1 ]; then
+  if ! command -v go >/dev/null 2>&1; then
+    echo "bombers: Go isn't installed, so the server can't be built." >&2
+    echo "         Install Go, then run this again: https://go.dev/dl/" >&2
+    exit 1
+  fi
+  echo "bombers: building..."
+  ( cd "$here" && go build -o "$bin" ./cmd/bombers )
+fi
+
+exec "$bin" "$@"
