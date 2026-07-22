@@ -108,6 +108,12 @@ func main() {
 		runMigrate(rest)
 	case "update":
 		runUpdate(rest)
+	case "stop":
+		runStop(rest)
+	case "status":
+		runStatusCmd(rest)
+	case "logs":
+		runLogs(rest)
 	case "console":
 		runConsole(rest)
 	case "service":
@@ -134,7 +140,10 @@ Usage:
   bombers [command] [flags]
 
 Commands:
-  start      Run the server (the default when no command is given)
+  start      Run the server in the BACKGROUND (the default when no command is given)
+  stop       Stop the background server
+  status     Is the background server running, and where are its logs
+  logs       Print the tail of the background server's log (logs [lines])
   setup      (Re)configure local self-host settings, then exit — does not serve
   doctor     Check the local setup for problems
   migrate    Apply pending database migrations, then exit — does not serve
@@ -146,7 +155,8 @@ Commands:
   help       Show this help and exit
 
 Flags:
-  --headless   (start) serve without the interactive admin console; stop with SIGINT/SIGTERM
+  --foreground (start) stay attached to this terminal, with the admin console
+  --headless   (start) no admin console; stop with SIGINT/SIGTERM
 
 Service actions:
   bombers service install     Register the binary as an OS background service
@@ -477,7 +487,42 @@ func runStart(args []string) {
 	flags := flag.NewFlagSet("start", flag.ExitOnError)
 	headless := flags.Bool("headless", false,
 		"serve without the interactive admin console (stop with SIGINT/SIGTERM)")
+	foreground := flags.Bool("foreground", false,
+		"stay attached to this terminal instead of running in the background")
 	_ = flags.Parse(args)
+
+	// DEFAULT: go to the background and give the prompt back. The server keeps
+	// running after this shell closes; `bombers stop` ends it, `bombers console`
+	// opens the admin prompt, `bombers logs` shows its output.
+	//
+	// --foreground keeps the old behaviour (serve here, with the console). A
+	// service-manager launch never reaches this function through the daemonising
+	// path, so systemd still owns its own process.
+	if !*foreground {
+		pid, err := daemonize([]string{"start", "--foreground", "--headless"})
+		if err != nil {
+			logx.Init()
+			logx.Fatal("start: %v", err)
+		}
+		logx.Init()
+		pidPath, logPath, _ := runtimePaths()
+
+		// Don't claim success and walk away: a bad config or an unreachable
+		// database kills the child within a moment, and "running in the
+		// background" would be a lie you'd only catch by checking the log.
+		time.Sleep(1500 * time.Millisecond)
+		if !processAlive(pid) {
+			_ = os.Remove(pidPath)
+			logx.Error("the server started and then exited — its last output:")
+			runLogs([]string{"15"})
+			os.Exit(1)
+		}
+
+		logx.Info("bombers is running in the background (pid %d)", pid)
+		logx.Info("  logs:  %s", logPath)
+		logx.Info("  admin: bombers console    stop: bombers stop")
+		return
+	}
 
 	// Load .env before configuring the logger so LOG_TIME_FORMAT / NO_COLOR from
 	// the file take effect; hold any real load error until logx is up to report

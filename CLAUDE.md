@@ -76,9 +76,21 @@ Each `internal/<domain>` owns its own routes, logic, and queries (typical files:
 
 Standard Go workflow (no `Makefile`):
 
-The binary is a `bombers <command>` CLI (`start` / `setup` / `doctor` /
-`console` / `service` / `uninstall` / `version` / `help`). A bare invocation
-defaults to `start`, so the old no-subcommand behavior is preserved. `service` runs the
+The binary is a `bombers <command>` CLI (`start` / `stop` / `status` / `logs` /
+`setup` / `doctor` / `migrate` / `update` / `console` / `service` / `uninstall` /
+`version` / `help`). A bare invocation defaults to `start`.
+
+**`start` runs in the BACKGROUND by default** — the binary daemonises itself (no
+systemd, no root): it re-execs detached with output redirected to
+`<dataDir>/server.log`, records `<dataDir>/server.pid`, waits ~1.5s to confirm
+the child is still alive (a dead child prints its log tail and exits 1 rather
+than falsely reporting success), and returns your prompt. `bombers stop` sends
+SIGTERM and waits for a graceful shutdown; `bombers status` reports running/pid/
+log path; `bombers logs [n]` tails it; `bombers console` opens the admin prompt
+against it. `start --foreground` keeps the old attached behaviour with the
+interactive console, and `--headless` drops the console. The `service`
+subcommands remain the heavier option for when the OS should own the process
+(start on boot, restart on failure). `service` runs the
 binary as a detached
 OS background service (Windows Service / systemd / launchd) via the
 `github.com/kardianos/service` dep; `uninstall` is the full local teardown. The
