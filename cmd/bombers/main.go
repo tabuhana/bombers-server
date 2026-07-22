@@ -791,6 +791,12 @@ func runMigrate(_ []string) {
 		logx.Fatal("config: %v", err)
 	}
 
+	// An embedded-Postgres host has no database running until the server starts
+	// one, so a standalone migrate can only fail here. Say what to do instead.
+	if cfg.DBBackend == "embedded" {
+		logx.Fatal("this server runs its own Postgres - migrations are applied when it starts, so just run `bombers start`")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
