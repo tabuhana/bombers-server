@@ -1,0 +1,4 @@
+# The launcher is a POSIX shell script: it MUST keep LF endings or a Linux
+# checkout gets "#!/bin/sh" and fails with a confusing bad-interpreter error.
+bombers text eol=lf
+*.sh text eol=lf
