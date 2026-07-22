@@ -24,6 +24,14 @@ type Config struct {
 	Port        string
 	DatabaseURL string
 
+	// AutoMigrate applies pending migrations at startup. OFF by default: on a
+	// managed/external database, applying schema changes should be deliberate.
+	// It exists for platforms where there is no shell to run a command in — set
+	// AUTO_MIGRATE=true on a container host (Railway, Fly, a plain Docker
+	// deploy) and every deploy brings its own schema with it. The embedded
+	// backend always migrates itself and ignores this.
+	AutoMigrate bool
+
 	// DBBackend selects where Postgres comes from: "external" (default — a
 	// DATABASE_URL you provide, the managed path) or "embedded" (the server runs
 	// its own local Postgres, self-host). DATABASE_URL is required only for the
@@ -92,6 +100,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
+		AutoMigrate:       truthy(optional("AUTO_MIGRATE", "")),
 		Host:              optional("HOST", ""),
 		Port:              optional("PORT", defaultPort),
 		DatabaseURL:       requireDB("DATABASE_URL"),
@@ -111,4 +120,13 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
 	return cfg, nil
+}
+
+// truthy reads the usual spellings of "yes" for a boolean env var.
+func truthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

@@ -305,6 +305,19 @@ func buildAndServe() (*app, error) {
 		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 		pool, err = store.NewPool(ctx, connStr)
 	} else {
+		// A container host has no shell to run `bombers migrate` in, so
+		// AUTO_MIGRATE lets a deploy carry its own schema. Deliberately opt-in:
+		// on a managed database, schema changes shouldn't happen as a side
+		// effect of a restart.
+		if cfg.AutoMigrate {
+			mctx, mcancel := context.WithTimeout(context.Background(), 60*time.Second)
+			if merr := migrate.Up(mctx, cfg.DatabaseURL); merr != nil {
+				mcancel()
+				cancel()
+				return nil, fmt.Errorf("running migrations: %w", merr)
+			}
+			mcancel()
+		}
 		pool, err = store.NewPool(ctx, cfg.DatabaseURL)
 	}
 	cancel()
@@ -491,14 +504,18 @@ func runStart(args []string) {
 		"stay attached to this terminal instead of running in the background")
 	_ = flags.Parse(args)
 
-	// DEFAULT: go to the background and give the prompt back. The server keeps
-	// running after this shell closes; `bombers stop` ends it, `bombers console`
-	// opens the admin prompt, `bombers logs` shows its output.
+	// DEFAULT AT A TERMINAL: go to the background and give the prompt back. The
+	// server keeps running after this shell closes; `bombers stop` ends it,
+	// `bombers console` opens the admin prompt, `bombers logs` shows its output.
 	//
-	// --foreground keeps the old behaviour (serve here, with the console). A
-	// service-manager launch never reaches this function through the daemonising
-	// path, so systemd still owns its own process.
-	if !*foreground {
+	// NOT at a terminal — a container, systemd, a CI job — stay in the
+	// FOREGROUND. Something else is already supervising us there, and forking
+	// away would look exactly like the process exiting: the platform would call
+	// the deploy dead and restart it forever. This is why there's no flag to
+	// remember on Railway; `bombers start` is simply correct in both places.
+	//
+	// --foreground forces the attached path explicitly.
+	if !*foreground && logx.Interactive() {
 		pid, err := daemonize([]string{"start", "--foreground", "--headless"})
 		if err != nil {
 			logx.Init()

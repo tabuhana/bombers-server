@@ -121,6 +121,29 @@ gofmt -w .
 
 A local Postgres + MinIO are available via `docker compose up -d` (Postgres uses `DB_NAME`/`DB_USER`/`DB_PASSWORD`, binds 5432; MinIO uses `S3_ACCESS_KEY`/`S3_SECRET_KEY`, binds 9000 + console 9001 — the server creates the media bucket itself on startup). `server.exe` in the repo root is a stale committed build artifact — `.gitignore` excludes `*.exe`, so don't rely on or re-commit it; rebuild with `go build`.
 
+### Container hosts (Railway, Fly, plain Docker)
+
+`install` / `setup` / `update` / the admin console are the SELF-HOSTED path and
+never run on a platform host: there is no PATH to install into, no wizard to
+answer, and no git pull to react to. A platform builds the binary from the repo
+and runs it; configuration is env vars.
+
+Two behaviours make `bombers start` the correct start command there with nothing
+special configured:
+
+- **It stays in the foreground when stdout isn't a terminal.** Backgrounding is
+  for a human shell. In a container, forking away looks exactly like the process
+  exiting — the platform would call the deploy dead and restart forever. The same
+  check keeps a systemd-launched process in the foreground.
+- **`AUTO_MIGRATE=true` applies pending migrations at startup**, so a deploy
+  carries its own schema. Opt-in on purpose: on a managed database, schema
+  changes shouldn't be a side effect of a restart. Leave it unset and use a
+  pre-deploy `bombers migrate` instead if you'd rather a failed migration block
+  the deploy. (The embedded backend always migrates itself and ignores this.)
+
+`PORT` is read from the environment (platforms inject it), `/health` is the
+health-check path, and SIGTERM triggers the graceful shutdown a redeploy needs.
+
 ### Migrations (goose)
 
 Migrations live in `migrations/` at the repo root, written as `-- +goose Up` / `-- +goose Down` SQL files.
