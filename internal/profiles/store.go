@@ -41,11 +41,18 @@ type profileRecord struct {
 	Timezone    string
 	Bio         string
 	Visibility  string
-	UpdatedAt   time.Time
+	// The Me-card facts the sharing UI hands out per person. Nickname and City
+	// are plain text; Notes is OPAQUE JSON the server stores and returns without
+	// ever looking inside (same contract as a sync blob).
+	Nickname  string
+	City      string
+	Notes     []byte
+	UpdatedAt time.Time
 }
 
 const getProfileSQL = `
-SELECT user_id, display_name, birthday, country, timezone, bio, visibility, updated_at
+SELECT user_id, display_name, birthday, country, timezone, bio, visibility,
+       nickname, city, notes, updated_at
 FROM profiles
 WHERE user_id = $1
 `
@@ -53,7 +60,8 @@ WHERE user_id = $1
 func getProfile(ctx context.Context, db dbExecutor, userID string) (*profileRecord, error) {
 	var p profileRecord
 	err := db.QueryRow(ctx, getProfileSQL, userID).Scan(
-		&p.UserID, &p.DisplayName, &p.Birthday, &p.Country, &p.Timezone, &p.Bio, &p.Visibility, &p.UpdatedAt,
+		&p.UserID, &p.DisplayName, &p.Birthday, &p.Country, &p.Timezone, &p.Bio, &p.Visibility,
+		&p.Nickname, &p.City, &p.Notes, &p.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProfileNotFound
@@ -68,8 +76,9 @@ func getProfile(ctx context.Context, db dbExecutor, userID string) (*profileReco
 // ON CONFLICT (user_id) overwrites the editable fields and bumps updated_at;
 // created_at is preserved by leaving it out of the SET list.
 const upsertProfileSQL = `
-INSERT INTO profiles (user_id, display_name, birthday, country, timezone, bio, visibility, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+INSERT INTO profiles (user_id, display_name, birthday, country, timezone, bio, visibility,
+                      nickname, city, notes, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
 ON CONFLICT (user_id) DO UPDATE SET
   display_name = EXCLUDED.display_name,
   birthday     = EXCLUDED.birthday,
@@ -77,16 +86,26 @@ ON CONFLICT (user_id) DO UPDATE SET
   timezone     = EXCLUDED.timezone,
   bio          = EXCLUDED.bio,
   visibility   = EXCLUDED.visibility,
+  nickname     = EXCLUDED.nickname,
+  city         = EXCLUDED.city,
+  notes        = EXCLUDED.notes,
   updated_at   = NOW()
-RETURNING user_id, display_name, birthday, country, timezone, bio, visibility, updated_at
+RETURNING user_id, display_name, birthday, country, timezone, bio, visibility,
+          nickname, city, notes, updated_at
 `
 
 func upsertProfile(ctx context.Context, pool *pgxpool.Pool, p *profileRecord) (*profileRecord, error) {
 	var out profileRecord
+	notes := p.Notes
+	if len(notes) == 0 {
+		notes = []byte("[]") // the column is NOT NULL jsonb; empty means "no jots"
+	}
 	err := pool.QueryRow(ctx, upsertProfileSQL,
 		p.UserID, p.DisplayName, p.Birthday, p.Country, p.Timezone, p.Bio, p.Visibility,
+		p.Nickname, p.City, notes,
 	).Scan(
-		&out.UserID, &out.DisplayName, &out.Birthday, &out.Country, &out.Timezone, &out.Bio, &out.Visibility, &out.UpdatedAt,
+		&out.UserID, &out.DisplayName, &out.Birthday, &out.Country, &out.Timezone, &out.Bio, &out.Visibility,
+		&out.Nickname, &out.City, &out.Notes, &out.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("upsert profile: %w", err)

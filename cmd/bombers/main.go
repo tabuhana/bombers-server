@@ -364,6 +364,10 @@ func buildAndServe() (*app, error) {
 		r.Post("/friends/{userID}/unblock", friendsHandler.Unblock)
 		r.Get("/me/profile", profilesHandler.GetMine)
 		r.Put("/me/profile", profilesHandler.UpdateMine)
+		// Per-field sharing: the client resolves its own relationship groups to
+		// friend ids and publishes the result; the server never sees a group.
+		r.Get("/me/profile/shares", profilesHandler.GetMyShares)
+		r.Put("/me/profile/shares", profilesHandler.PutMyShares)
 		r.Get("/profiles/{userID}", profilesHandler.GetForUser)
 		r.Get("/me/about", profilesHandler.ListMyAbout)
 		r.Get("/me/about/{subjectID}", profilesHandler.GetMyAbout)

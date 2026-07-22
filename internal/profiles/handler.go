@@ -27,6 +27,10 @@ const (
 	maxCountry     = 100
 	maxTimezone    = 64
 	maxBio         = 4000
+	maxNickname    = 100
+	maxCity        = 120
+	// Jots are short text; this is generous while still bounding one row.
+	maxNotesBytes = 1 << 15 // 32 KiB
 
 	birthdayLayout = "2006-01-02"
 
@@ -51,17 +55,23 @@ func NewHandler(pool *pgxpool.Pool) *Handler {
 // server-relative, versioned serve-URLs (see types.MediaURL) — null until the
 // user uploads that media kind.
 type profileResponse struct {
-	UserID      string     `json:"user_id"`
-	DisplayName string     `json:"display_name"`
-	Birthday    *string    `json:"birthday"`
-	Age         *int       `json:"age"`
-	Country     string     `json:"country"`
-	Timezone    string     `json:"timezone"`
-	Bio         string     `json:"bio"`
-	Visibility  string     `json:"visibility"`
-	AvatarURL   *string    `json:"avatar_url"`
-	BannerURL   *string    `json:"banner_url"`
-	UpdatedAt   *time.Time `json:"updated_at"`
+	UserID      string  `json:"user_id"`
+	DisplayName string  `json:"display_name"`
+	Birthday    *string `json:"birthday"`
+	Age         *int    `json:"age"`
+	Country     string  `json:"country"`
+	Timezone    string  `json:"timezone"`
+	Bio         string  `json:"bio"`
+	Visibility  string  `json:"visibility"`
+	// Me-card facts. These are the per-viewer SHARED fields: on someone else's
+	// read they are present only if you granted them that field, so a friend who
+	// isn't in the right group sees them as empty/null rather than as a denial.
+	Nickname  string          `json:"nickname"`
+	City      string          `json:"city"`
+	Notes     json.RawMessage `json:"notes"`
+	AvatarURL *string         `json:"avatar_url"`
+	BannerURL *string         `json:"banner_url"`
+	UpdatedAt *time.Time      `json:"updated_at"`
 }
 
 // attachMedia fills the response's avatar/banner URLs from the user_media
@@ -87,6 +97,9 @@ func toResponse(p *profileRecord, now time.Time) profileResponse {
 		Timezone:    p.Timezone,
 		Bio:         p.Bio,
 		Visibility:  p.Visibility,
+		Nickname:    p.Nickname,
+		City:        p.City,
+		Notes:       notesOrEmpty(p.Notes),
 	}
 	if !p.UpdatedAt.IsZero() {
 		resp.UpdatedAt = &p.UpdatedAt
@@ -146,12 +159,15 @@ func (h *Handler) GetMine(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateProfileRequest struct {
-	DisplayName string `json:"display_name"`
-	Birthday    string `json:"birthday"` // "YYYY-MM-DD" or "" to clear
-	Country     string `json:"country"`
-	Timezone    string `json:"timezone"`
-	Bio         string `json:"bio"`
-	Visibility  string `json:"visibility"`
+	DisplayName string          `json:"display_name"`
+	Birthday    string          `json:"birthday"` // "YYYY-MM-DD" or "" to clear
+	Country     string          `json:"country"`
+	Timezone    string          `json:"timezone"`
+	Bio         string          `json:"bio"`
+	Visibility  string          `json:"visibility"`
+	Nickname    string          `json:"nickname"`
+	City        string          `json:"city"`
+	Notes       json.RawMessage `json:"notes"` // opaque array of jots
 }
 
 // UpdateMine upserts the authed user's self-card.
@@ -195,8 +211,12 @@ func (req *updateProfileRequest) toRecord(userID string) (*profileRecord, string
 	timezone := strings.TrimSpace(req.Timezone)
 	bio := strings.TrimSpace(req.Bio)
 
+	nickname := strings.TrimSpace(req.Nickname)
+	city := strings.TrimSpace(req.City)
+
 	if len(displayName) > maxDisplayName || len(country) > maxCountry ||
-		len(timezone) > maxTimezone || len(bio) > maxBio {
+		len(timezone) > maxTimezone || len(bio) > maxBio ||
+		len(nickname) > maxNickname || len(city) > maxCity || len(req.Notes) > maxNotesBytes {
 		return nil, errFieldTooLong
 	}
 
@@ -225,6 +245,9 @@ func (req *updateProfileRequest) toRecord(userID string) (*profileRecord, string
 		Timezone:    timezone,
 		Bio:         bio,
 		Visibility:  visibility,
+		Nickname:    nickname,
+		City:        city,
+		Notes:       notesOrEmpty(req.Notes),
 	}, ""
 }
 
@@ -252,8 +275,50 @@ func (h *Handler) GetForUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := toResponse(p, time.Now())
+	// Your own card is never redacted; anyone else sees only the fields you
+	// granted THEM (see redactUnshared).
+	if targetID != authedID {
+		shared, err := sharedFieldsFor(r.Context(), h.pool, targetID, authedID)
+		if err != nil {
+			logx.Error("profiles: shared fields: %v", err)
+			shared = map[string]bool{} // fail CLOSED - share nothing on error
+		}
+		redactUnshared(&resp, shared)
+	}
 	h.attachMedia(r.Context(), &resp)
 	httpx.WriteJSON(w, http.StatusOK, resp)
+}
+
+// redactUnshared blanks every per-viewer field the viewer wasn't granted. The
+// base card (name, bio, avatar, banner) stays visible to any accepted friend, as
+// it always has - sharing governs the FACTS the Me card added, and an ungranted
+// field simply reads as unset rather than as a refusal, so a viewer can't tell
+// "not shared with me" from "never filled in".
+func redactUnshared(resp *profileResponse, shared map[string]bool) {
+	if !shared[FieldBirthday] {
+		resp.Birthday = nil
+		resp.Age = nil
+	}
+	if !shared[FieldLocation] {
+		resp.Country = ""
+		resp.Timezone = ""
+		resp.City = ""
+	}
+	if !shared[FieldNickname] {
+		resp.Nickname = ""
+	}
+	if !shared[FieldNotes] {
+		resp.Notes = json.RawMessage("[]")
+	}
+}
+
+// notesOrEmpty normalises stored/incoming jots to a valid JSON array, so the
+// wire shape is never null and the jsonb column never gets an empty string.
+func notesOrEmpty(raw []byte) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage("[]")
+	}
+	return json.RawMessage(raw)
 }
 
 // resolveVisibleProfile applies the authorization rules and returns either the
