@@ -510,6 +510,15 @@ func runStart(args []string) {
 		"stay attached to this terminal instead of running in the background")
 	_ = flags.Parse(args)
 
+	// Load .env before configuring the logger so LOG_TIME_FORMAT / NO_COLOR from
+	// the file take effect; hold any real load error until logx is up to report
+	// it in the leveled format.
+	envErr := godotenv.Load()
+	logx.Init()
+	if envErr != nil && !errors.Is(envErr, fs.ErrNotExist) {
+		logx.Fatal("loading .env: %v", envErr)
+	}
+
 	// DEFAULT AT A TERMINAL: go to the background and give the prompt back. The
 	// server keeps running after this shell closes; `bombers stop` ends it,
 	// `bombers console` opens the admin prompt, `bombers logs` shows its output.
@@ -524,10 +533,8 @@ func runStart(args []string) {
 	if !*foreground && logx.Interactive() {
 		pid, err := daemonize([]string{"start", "--foreground", "--headless"})
 		if err != nil {
-			logx.Init()
 			logx.Fatal("start: %v", err)
 		}
-		logx.Init()
 		pidPath, logPath, _ := runtimePaths()
 
 		// Don't claim success and walk away: a bad config or an unreachable
@@ -550,12 +557,6 @@ func runStart(args []string) {
 	// Load .env before configuring the logger so LOG_TIME_FORMAT / NO_COLOR from
 	// the file take effect; hold any real load error until logx is up to report
 	// it in the leveled format.
-	envErr := godotenv.Load()
-	logx.Init()
-	if envErr != nil && !errors.Is(envErr, fs.ErrNotExist) {
-		logx.Fatal("loading .env: %v", envErr)
-	}
-
 	// The banner is decorative — print it on a real terminal only so piped or
 	// redirected logs stay clean.
 	if logx.Interactive() {
