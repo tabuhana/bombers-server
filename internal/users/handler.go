@@ -137,6 +137,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if user != nil {
 		hash = []byte(user.PasswordHash)
 	}
+	// A banned account is turned away here, before the password is even
+	// checked against it. Same opaque message as a wrong password: whether an
+	// account exists (or is banned) isn't something a stranger should learn.
+	if user.Banned {
+		httpx.WriteError(w, http.StatusUnauthorized, errInvalidCredentials)
+		return
+	}
+
 	cmpErr := bcrypt.CompareHashAndPassword(hash, []byte(req.Password))
 
 	if user == nil || cmpErr != nil || canonical == "" || len(req.Password) > PasswordMaxBytes {

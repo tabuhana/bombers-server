@@ -84,4 +84,3 @@ func invalidateAllUserRefreshTokens(ctx context.Context, db dbExecutor, userID s
 	}
 	return nil
 }
-

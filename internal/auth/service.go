@@ -118,6 +118,16 @@ func (s *Service) Rotate(ctx context.Context, rawRefresh string) (TokenPair, err
 		return TokenPair{}, ErrInvalidRefresh
 	}
 
+	// A banned account cannot renew. Access tokens are short-lived, so refusing
+	// here is what makes a ban actually take hold — within one token lifetime,
+	// without a database read on every authed request. A narrow query rather
+	// than importing the users domain, the same tradeoff every domain makes.
+	var banned bool
+	if err := tx.QueryRow(ctx,
+		`SELECT banned_at IS NOT NULL FROM users WHERE id = $1`, row.UserID).Scan(&banned); err == nil && banned {
+		return TokenPair{}, ErrInvalidRefresh
+	}
+
 	if row.UsedAt != nil {
 		// REUSE DETECTED. Kill every still-valid refresh token for this
 		// user, then EXPLICITLY COMMIT so the kill persists — the deferred

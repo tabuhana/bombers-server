@@ -61,7 +61,8 @@ func insertUser(ctx context.Context, pool *pgxpool.Pool, u *User) error {
 }
 
 const getUserByCanonicalSQL = `
-SELECT id, username, username_canonical, password_hash, friend_code, created_at
+SELECT id, username, username_canonical, password_hash, friend_code, created_at,
+       banned_at IS NOT NULL
 FROM users
 WHERE username_canonical = $1
 `
@@ -72,6 +73,7 @@ func getUserByCanonical(ctx context.Context, pool *pgxpool.Pool, canonical strin
 	var u User
 	err := pool.QueryRow(ctx, getUserByCanonicalSQL, canonical).Scan(
 		&u.ID, &u.Username, &u.UsernameCanonical, &u.PasswordHash, &u.FriendCode, &u.CreatedAt,
+		&u.Banned,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound

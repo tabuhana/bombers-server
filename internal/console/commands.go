@@ -21,7 +21,11 @@ func builtins() []command {
 	return []command{
 		{name: "help", help: "list available commands", run: runHelp},
 		{name: "users", help: "list registered users (username, id, created)", run: runUsers},
-		{name: "status", help: "uptime, DB + media ping, and row counts", run: runStatus},
+		{name: "status", help: "uptime, address, DB + media health", run: runStatus},
+		{name: "ban", help: "ban <username|id> [reason] — block an account from logging in", run: runBan},
+		{name: "unban", help: "unban <username|id> — lift a ban", run: runUnban},
+		{name: "banned", help: "list banned accounts", run: runBanned},
+		{name: "deluser", help: "deluser <username|id> — DELETE an account and everything it owns", run: runDeleteUser},
 		{name: "address", aliases: []string{"addr", "url"}, help: "the URL(s) this server is reachable at (hand one to a client)", run: runAddress},
 		{name: "logtime", help: "show or set the log timestamp format (time|datetime|iso)", run: runLogtime},
 		{name: "store", help: "list store-published nodes (id, name, version)", run: runStore},

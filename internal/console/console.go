@@ -47,6 +47,9 @@ type Console struct {
 	in        io.Reader
 	out       io.Writer
 	commands  []command
+	// scanner is created by Run and shared with confirm(): a second scanner over
+	// the same reader would buffer ahead and swallow the next command.
+	scanner *bufio.Scanner
 }
 
 type command struct {
@@ -112,6 +115,7 @@ func Interactive(f *os.File) bool {
 // signal-waiting and keep serving, exactly like --headless).
 func (c *Console) Run() bool {
 	scanner := bufio.NewScanner(c.in)
+	c.scanner = scanner
 	for {
 		fmt.Fprint(c.out, "bombers> ")
 		if !scanner.Scan() {
@@ -153,4 +157,22 @@ func (c *Console) lookup(name string) *command {
 		}
 	}
 	return nil
+}
+
+// confirm asks a destructive command's question and reports whether the operator
+// typed `expect` exactly. Typing the name back is deliberately more friction
+// than "y" — this is the one place the console destroys data.
+//
+// Without a live input scanner (a piped or absent stdin) it answers NO: an
+// irreversible action must never proceed just because nobody could be asked.
+func (c *Console) confirm(prompt, expect string) bool {
+	if c.scanner == nil {
+		fmt.Fprintln(c.out, "  (no interactive input — refusing)")
+		return false
+	}
+	fmt.Fprint(c.out, prompt)
+	if !c.scanner.Scan() {
+		return false
+	}
+	return strings.TrimSpace(c.scanner.Text()) == expect
 }

@@ -16,6 +16,9 @@ type User struct {
 	PasswordHash      string
 	FriendCode        string
 	CreatedAt         time.Time
+	// Banned mirrors `banned_at IS NOT NULL`. Checked at the doors (login,
+	// refresh) rather than on every request — see the ban migration.
+	Banned bool
 }
 
 func (u *User) Public() types.PublicUser {
