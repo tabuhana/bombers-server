@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -848,43 +849,16 @@ const (
 //
 // It stays a deliberate step rather than something `start` does implicitly:
 // applying schema changes should be a thing you asked for.
+// runMigrate applies pending migrations and exits. It never serves.
+//
+// migrateNow handles both backends: with embedded Postgres nothing is listening
+// between server runs, so it starts the database, migrates, and stops it again.
+// (Refusing in that case, as this used to, made `update` impossible on a
+// self-hosted install.)
 func runMigrate(_ []string) {
-	_ = godotenv.Load()
+	loadEnvAndConfig()
 	logx.Init()
-
-	// Same config layering as buildAndServe: saved local config under the
-	// environment, so this works in local-mode and managed setups alike.
-	if dir, err := setup.DataDir(); err == nil {
-		if fc, ferr := setup.Load(dir); ferr == nil {
-			setup.EnsureSecret(fc)
-			fc.Apply()
-		}
-	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		logx.Fatal("config: %v", err)
-	}
-
-	// An embedded-Postgres host has no database running until the server starts
-	// one, so a standalone migrate can only fail here. Say what to do instead.
-	if cfg.DBBackend == "embedded" {
-		logx.Fatal("this server runs its own Postgres - migrations are applied when it starts, so just run `bombers start`")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	if err := migrate.Up(ctx, cfg.DatabaseURL); err != nil {
-		// pgx reports an unreachable server as a multi-line dump of every
-		// address it tried. That's noise for the one mistake people actually
-		// make - forgetting to start Postgres - so say the useful thing instead.
-		if isUnreachableDB(err) {
-			logx.Fatal("could not reach the database at %s - is Postgres running?", redactDBURL(cfg.DatabaseURL))
-		}
-		logx.Fatal("migrate: %v", err)
-	}
-	logx.Info("database is up to date")
+	migrateNow()
 }
 
 // isUnreachableDB reports whether an error is "nothing is listening" rather than
@@ -1082,6 +1056,14 @@ func runConsole(_ []string) {
 	_ = godotenv.Load()
 	logx.Init()
 
+	// This is the front door now (a bare `bombers` lands here), so it should
+	// look like one: clear the screen and show the banner before the prompt,
+	// the way the server's own console does on launch.
+	if logx.Interactive() {
+		clearScreen(os.Stdout)
+		printBanner(os.Stdout)
+	}
+
 	// Layer the saved local config under the environment (best-effort, like
 	// doctor) so a self-host install resolves the same DB/media/bind the running
 	// server did. A managed/pure-env host simply has nothing to load here.
@@ -1134,7 +1116,9 @@ func runConsole(_ []string) {
 		mcancel()
 	}
 
-	fmt.Println("Bombers admin console — connected. Type \"help\", or \"exit\" to leave (the server keeps running).")
+	fmt.Printf("  connected to %s\n", strings.Join(console.ReachableURLs(cfg.Host, cfg.Port), "  "))
+	fmt.Println("  type \"help\" for commands · \"exit\" leaves the console; the server keeps running")
+	fmt.Println()
 
 	// Zero start time → status reports uptime as "n/a (console session)" (no real
 	// process uptime here). Ignore the returned bool: stop/exit/quit all just leave
@@ -1164,4 +1148,10 @@ func healthHandler(pool *pgxpool.Pool, storage media.Store) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok","db":"up","media":"` + mediaState + `"}`))
 	}
+}
+
+// clearScreen resets an interactive terminal (ANSI: clear + cursor home). Only
+// ever called when stdout is a real terminal, so piped output stays clean.
+func clearScreen(w io.Writer) {
+	fmt.Fprint(w, "\x1b[2J\x1b[H")
 }

@@ -114,7 +114,10 @@ no `go build`. After `install`, it's out of the picture.
   restart-on-failure; it is no longer needed just to run in the background.
 
 Underneath, the plumbing commands still exist: `migrate`, `doctor`, `console`,
-`version`, `uninstall`.
+`version`, `uninstall`. `migrate` works on BOTH backends — with embedded
+Postgres it starts the database, migrates, and stops it again, since nothing is
+listening between server runs (refusing in that case made `update` impossible on
+a self-hosted install).
 
 ```powershell
 go build ./...                          # compile everything (binary: bombers)
