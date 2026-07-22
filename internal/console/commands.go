@@ -103,25 +103,6 @@ func runStatus(ctx context.Context, c *Console, _ []string) error {
 		fmt.Fprintln(c.out, "  media:   up")
 	}
 
-	// Row counts need the DB; skip just them (not the whole command) when it's
-	// down. Best-effort otherwise — one failing table (e.g. a migration not yet
-	// applied) shouldn't kill the rest of status.
-	if dbErr != nil {
-		return nil
-	}
-	for _, q := range []struct{ label, sql string }{
-		{"users", `SELECT COUNT(*) FROM users`},
-		{"friendships (accepted)", `SELECT COUNT(*) FROM friendships WHERE state = 'accepted'`},
-		{"messages", `SELECT COUNT(*) FROM messages`},
-		{"node transfers", `SELECT COUNT(*) FROM node_transfers`},
-	} {
-		var n int64
-		if err := c.pool.QueryRow(ctx, q.sql).Scan(&n); err != nil {
-			fmt.Fprintf(c.out, "  %-22s ? (%v)\n", q.label+":", err)
-			continue
-		}
-		fmt.Fprintf(c.out, "  %-22s %d\n", q.label+":", n)
-	}
 	return nil
 }
 
