@@ -35,6 +35,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/nodes"
 	"github.com/tabuhana/bombers-server/internal/nodeshare"
 	"github.com/tabuhana/bombers-server/internal/profiles"
+	"github.com/tabuhana/bombers-server/internal/rooms"
 	"github.com/tabuhana/bombers-server/internal/setup"
 	"github.com/tabuhana/bombers-server/internal/store"
 	"github.com/tabuhana/bombers-server/internal/svc"
@@ -338,6 +339,7 @@ func buildAndServe() (*app, error) {
 	nodesHandler := nodes.NewHandler(pool)
 	nodeshareHandler := nodeshare.NewHandler(pool)
 	mediaHandler := media.NewHandler(pool, storage)
+	roomsHandler := rooms.NewHandler(pool, issuer)
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
@@ -349,6 +351,11 @@ func buildAndServe() (*app, error) {
 	r.Post("/auth/register", usersHandler.Register)
 	r.Post("/auth/login", usersHandler.Login)
 	r.Post("/auth/refresh", authHandler.Refresh)
+	// Activity rooms: the realtime relay. The JOIN is a WebSocket upgrade and so
+	// sits OUTSIDE the RequireAuth group - a webview cannot put an Authorization
+	// header on a socket, so the access token rides the `bearer` subprotocol and
+	// the handler verifies it with the same issuer.
+	r.Get("/rooms/{roomID}/ws", roomsHandler.Join)
 
 	r.Group(func(r chi.Router) {
 		r.Use(issuer.RequireAuth)
@@ -398,7 +405,16 @@ func buildAndServe() (*app, error) {
 		r.Put("/me/media/{kind}", mediaHandler.Upload)
 		r.Delete("/me/media/{kind}", mediaHandler.Delete)
 		r.Get("/media/{userID}/{kind}", mediaHandler.Serve)
+		// Creating a room is ordinary authed HTTP; the creator becomes its host
+		// (the referee). Rooms are in-memory and ephemeral - nothing persists.
+		r.Post("/rooms", roomsHandler.Create)
 	})
+
+	// Sweep rooms that have sat empty past the grace period. Rooms are in-memory,
+	// so this is the only cleanup they need; it stops when the process does.
+	reaperCtx, stopReaper := context.WithCancel(context.Background())
+	defer stopReaper()
+	roomsHandler.StartReaper(reaperCtx)
 
 	startedAt := time.Now()
 	srv := &http.Server{Addr: cfg.Host + ":" + cfg.Port, Handler: r}
