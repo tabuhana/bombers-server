@@ -113,7 +113,9 @@ A local Postgres + MinIO are available via `docker compose up -d` (Postgres uses
 
 Migrations live in `migrations/` at the repo root, written as `-- +goose Up` / `-- +goose Down` SQL files.
 
-Install the CLI once:
+**The easy path — `bombers migrate`.** The binary embeds the migrations and applies them through the goose LIBRARY (the same path embedded Postgres uses at startup), so updating any database — external/dockerised included — needs no goose CLI, no exported `DATABASE_URL`, and no `-dir` flag. It reads `.env` exactly like the server, applies what's pending, and exits; an unreachable database reports one clean line instead of pgx's address dump. Deliberately NOT run by `start`: applying schema changes should be something you asked for. The workspace's `./server.sh update` chains containers → build → migrate → start for the after-a-pull routine.
+
+The goose CLI remains available for the things a library call can't do (`down`, `status`, `create`):
 
 ```powershell
 go install github.com/pressly/goose/v3/cmd/goose@latest

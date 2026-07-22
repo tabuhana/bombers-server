@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -103,6 +104,8 @@ func main() {
 		runSetup(rest)
 	case "doctor":
 		runDoctor(rest)
+	case "migrate":
+		runMigrate(rest)
 	case "console":
 		runConsole(rest)
 	case "service":
@@ -132,6 +135,7 @@ Commands:
   start      Run the server (the default when no command is given)
   setup      (Re)configure local self-host settings, then exit — does not serve
   doctor     Check the local setup for problems
+  migrate    Apply pending database migrations, then exit — does not serve
   console    Open the admin console against a running server (users, status, node store)
   service    Manage the OS background service (see actions below)
   uninstall  Remove the OS service and delete the local data directory
@@ -755,6 +759,71 @@ const (
 // is best-effort and every check prints a single status line. It exits 1 when
 // any check FAILs (so `bombers doctor && bombers start` gates a launch on a
 // clean bill of health); warnings and skips alone never fail.
+// runMigrate applies every pending schema migration and exits. It NEVER serves.
+//
+// The migrations are embedded in this binary and applied through the goose
+// LIBRARY - the same code path embedded Postgres already uses at startup - so
+// updating an external/dockerised database no longer means installing the goose
+// CLI, exporting DATABASE_URL by hand, or remembering the -dir flag. Pull the
+// code, run this, start the server.
+//
+// It stays a deliberate step rather than something `start` does implicitly:
+// applying schema changes should be a thing you asked for.
+func runMigrate(_ []string) {
+	_ = godotenv.Load()
+	logx.Init()
+
+	// Same config layering as buildAndServe: saved local config under the
+	// environment, so this works in local-mode and managed setups alike.
+	if dir, err := setup.DataDir(); err == nil {
+		if fc, ferr := setup.Load(dir); ferr == nil {
+			setup.EnsureSecret(fc)
+			fc.Apply()
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		logx.Fatal("config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if err := migrate.Up(ctx, cfg.DatabaseURL); err != nil {
+		// pgx reports an unreachable server as a multi-line dump of every
+		// address it tried. That's noise for the one mistake people actually
+		// make - forgetting to start Postgres - so say the useful thing instead.
+		if isUnreachableDB(err) {
+			logx.Fatal("could not reach the database at %s - is Postgres running?", redactDBURL(cfg.DatabaseURL))
+		}
+		logx.Fatal("migrate: %v", err)
+	}
+	logx.Info("database is up to date")
+}
+
+// isUnreachableDB reports whether an error is "nothing is listening" rather than
+// a genuine migration failure.
+func isUnreachableDB(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "actively refused") ||
+		strings.Contains(msg, "dial error") ||
+		strings.Contains(msg, "no such host")
+}
+
+// redactDBURL strips credentials so a connection string can be printed.
+func redactDBURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "the configured database"
+	}
+	if u.User != nil {
+		u.User = url.User(u.User.Username()) // drop the password
+	}
+	return u.Redacted()
+}
+
 func runDoctor(_ []string) {
 	_ = godotenv.Load()
 	logx.Init()
