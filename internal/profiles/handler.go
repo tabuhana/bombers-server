@@ -307,16 +307,45 @@ func redactUnshared(resp *profileResponse, shared map[string]bool) {
 	if !shared[FieldNickname] {
 		resp.Nickname = ""
 	}
-	if !shared[FieldNotes] {
-		resp.Notes = json.RawMessage("[]")
+	resp.Notes = filterNoteCategories(resp.Notes, shared)
+}
+
+// filterNoteCategories keeps only the note CATEGORIES this viewer was granted.
+//
+// Notes are published as an object keyed by category id — {"favorites": {...},
+// "dislikes": {...}} — and each category is granted separately as
+// "note:<id>". The server still never reads a note: it only decides which
+// top-level keys survive, exactly as it decides which fields do. An owner who
+// shared nothing gets an empty object, which reads as "no notes", not as a
+// refusal.
+func filterNoteCategories(raw json.RawMessage, shared map[string]bool) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage("{}")
 	}
+	var byCategory map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &byCategory); err != nil {
+		// Not an object (an older row stored an array) — nothing to filter per
+		// category, so share nothing rather than guess.
+		return json.RawMessage("{}")
+	}
+	kept := map[string]json.RawMessage{}
+	for id, body := range byCategory {
+		if shared[NotePrefix+id] {
+			kept[id] = body
+		}
+	}
+	out, err := json.Marshal(kept)
+	if err != nil {
+		return json.RawMessage("{}")
+	}
+	return out
 }
 
 // notesOrEmpty normalises stored/incoming jots to a valid JSON array, so the
 // wire shape is never null and the jsonb column never gets an empty string.
 func notesOrEmpty(raw []byte) json.RawMessage {
 	if len(raw) == 0 {
-		return json.RawMessage("[]")
+		return json.RawMessage("{}")
 	}
 	return json.RawMessage(raw)
 }

@@ -98,7 +98,7 @@ func upsertProfile(ctx context.Context, pool *pgxpool.Pool, p *profileRecord) (*
 	var out profileRecord
 	notes := p.Notes
 	if len(notes) == 0 {
-		notes = []byte("[]") // the column is NOT NULL jsonb; empty means "no jots"
+		notes = []byte("{}") // NOT NULL jsonb; an object keyed by note category
 	}
 	err := pool.QueryRow(ctx, upsertProfileSQL,
 		p.UserID, p.DisplayName, p.Birthday, p.Country, p.Timezone, p.Bio, p.Visibility,

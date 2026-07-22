@@ -63,7 +63,7 @@ func (h *Handler) PutMyShares(w http.ResponseWriter, r *http.Request) {
 	// Reject unknown field keys loudly: a typo that silently stored a grant
 	// nobody could ever read would look like sharing that isn't working.
 	for field := range req {
-		if !knownFields[field] {
+		if !isKnownField(field) {
 			httpx.WriteError(w, http.StatusBadRequest, errUnknownField)
 			return
 		}

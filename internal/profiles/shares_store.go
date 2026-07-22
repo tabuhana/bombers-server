@@ -3,6 +3,7 @@ package profiles
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,22 +17,44 @@ import (
 // only exists in one person's notebook and can be renamed or deleted at will.
 
 // The field keys the server recognises. Anything else in a publish is rejected,
-// so a typo can't silently create a grant nobody can ever read. These mirror the
-// client's SHARE_BLOCKS; adding one is a change in both places plus whatever
-// makes it visible in resolveSharedFields.
+// so a typo can't silently create a grant nobody can ever read.
 const (
 	FieldBirthday = "birthday"
 	FieldLocation = "location"
 	FieldNickname = "nickname"
-	FieldNotes    = "notes"
+
+	// NotePrefix marks a per-CATEGORY note field: "note:<categoryID>". The
+	// categories are the user's own ("Favorites", "Dislikes", anything they
+	// invent), so the set can't be fixed here — the server validates the SHAPE
+	// of the key and stays ignorant of what the category means, exactly as it
+	// stays ignorant of relationship groups.
+	NotePrefix = "note:"
+
+	maxCategoryIDLen = 64
 )
 
-// knownFields is the validation set for a publish.
-var knownFields = map[string]bool{
-	FieldBirthday: true,
-	FieldLocation: true,
-	FieldNickname: true,
-	FieldNotes:    true,
+// isKnownField validates a field key from a publish.
+func isKnownField(key string) bool {
+	switch key {
+	case FieldBirthday, FieldLocation, FieldNickname:
+		return true
+	}
+	if !strings.HasPrefix(key, NotePrefix) {
+		return false
+	}
+	id := strings.TrimPrefix(key, NotePrefix)
+	if id == "" || len(id) > maxCategoryIDLen {
+		return false
+	}
+	// Ids are client-generated (uuid or a short slug); keep them boring so a key
+	// can never smuggle anything odd into a response.
+	for _, r := range id {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // maxGrantsPerPublish caps one publish so a bad client can't write an unbounded
@@ -50,9 +73,12 @@ ORDER BY field_key, viewer_id
 // known field is present in the result (empty slice = shared with nobody), so
 // the client always receives a complete, editable shape.
 func getShares(ctx context.Context, db dbExecutor, ownerID string) (map[string][]string, error) {
-	out := map[string][]string{}
-	for f := range knownFields {
-		out[f] = []string{}
+	// Seed the fixed fields so the client always gets a complete shape for them.
+	// Note categories are open-ended, so they appear only once granted.
+	out := map[string][]string{
+		FieldBirthday: {},
+		FieldLocation: {},
+		FieldNickname: {},
 	}
 
 	rows, err := db.Query(ctx, getSharesSQL, ownerID)
@@ -106,7 +132,7 @@ func replaceShares(ctx context.Context, pool *pgxpool.Pool, ownerID string, shar
 	// One friendship lookup per distinct viewer, not per grant.
 	allowed := map[string]bool{}
 	for field, viewers := range shares {
-		if !knownFields[field] {
+		if !isKnownField(field) {
 			continue
 		}
 		for _, viewer := range viewers {
@@ -125,7 +151,7 @@ func replaceShares(ctx context.Context, pool *pgxpool.Pool, ownerID string, shar
 	}
 
 	for field, viewers := range shares {
-		if !knownFields[field] {
+		if !isKnownField(field) {
 			continue
 		}
 		for _, viewer := range viewers {
