@@ -138,7 +138,7 @@ Commands:
   setup      (Re)configure local self-host settings, then exit — does not serve
   doctor     Check the local setup for problems
   migrate    Apply pending database migrations, then exit — does not serve
-  update     After pulling + rebuilding: apply new migrations, then serve
+  update     After pulling + rebuilding: migrate the database, then exit — does not serve
   console    Open the admin console against a running server (users, status, node store)
   service    Manage the OS background service (see actions below)
   uninstall  Remove the OS service and delete the local data directory
@@ -146,8 +146,7 @@ Commands:
   help       Show this help and exit
 
 Flags:
-  --headless   (start, update) serve without the interactive admin console; stop with SIGINT/SIGTERM
-  --no-start   (update) apply migrations but don't serve — for a systemd/service setup
+  --headless   (start) serve without the interactive admin console; stop with SIGINT/SIGTERM
 
 Service actions:
   bombers service install     Register the binary as an OS background service

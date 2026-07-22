@@ -1,76 +1,88 @@
 package main
 
 import (
-	"flag"
+	"context"
+	"time"
+
+	"github.com/joho/godotenv"
 
 	"github.com/tabuhana/bombers-server/internal/config"
+	"github.com/tabuhana/bombers-server/internal/embeddedpg"
 	"github.com/tabuhana/bombers-server/internal/logx"
+	"github.com/tabuhana/bombers-server/internal/migrate"
 	"github.com/tabuhana/bombers-server/internal/setup"
 )
 
-// `bombers update` - what you run after pulling and rebuilding: make sure the
-// schema matches the new code, then serve. One command instead of remembering
-// `migrate` and then `start`.
+// `bombers update` — bring the database up to date with the code you just built,
+// then get out of the way.
 //
-// It has to be the FRESHLY BUILT binary, because migrations are embedded in it:
-// the old binary would apply the old set and report success.
+// It does NOT serve and it does NOT open the admin console. Updating and running
+// are separate acts: this brings up only what it needs, migrates, puts it back
+// down, and tells you where the schema landed. You start the server yourself.
 //
-// It also has to respect which database this host uses, and that distinction is
-// the whole reason this isn't a shell alias:
-//
-//   - EMBEDDED Postgres (local self-host): the server starts the database
-//     itself and migrates during startup. Nothing is listening beforehand, so a
-//     standalone migrate here would simply fail to connect. `update` therefore
-//     goes straight to `start`, which does both.
-//   - EXTERNAL Postgres (docker, managed, or a system service): the database is
-//     already up and nobody else applies migrations, so migrate first, then serve.
-func runUpdate(args []string) {
-	flags := flag.NewFlagSet("update", flag.ExitOnError)
-	noStart := flags.Bool("no-start", false, "apply migrations but don't serve (systemd/service setups)")
-	headless := flags.Bool("headless", false, "serve without the interactive console")
-	_ = flags.Parse(args)
+// The one wrinkle it handles for you: with embedded Postgres there is no
+// database running between server starts, so `update` starts it, migrates, and
+// stops it again. With an external Postgres (docker, systemd, managed) it just
+// migrates what's already there.
+func runUpdate(_ []string) {
+	loadEnvAndConfig()
+	logx.Init()
 
-	if embeddedBackend() {
-		logx.Info("update: this server runs its own Postgres - migrations are applied as it starts")
-		if *noStart {
-			logx.Info("update: nothing to do without starting; run `bombers start` when ready")
-			return
+	cfg, err := config.Load()
+	if err != nil {
+		logx.Fatal("config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	connString := cfg.DatabaseURL
+
+	if cfg.DBBackend == "embedded" {
+		dataDir, derr := setup.DataDir()
+		if derr != nil {
+			logx.Fatal("update: embedded Postgres needs a data directory: %v", derr)
 		}
-		startWith(*headless)
-		return
+		logx.Info("update: starting the database")
+		epg, conn, serr := embeddedpg.Start(dataDir)
+		if serr != nil {
+			logx.Fatal("update: starting Postgres: %v", serr)
+		}
+		connString = conn
+		// Always put it back down — this command owns the database only for as
+		// long as the migration takes.
+		defer func() {
+			logx.Info("update: stopping the database")
+			if err := epg.Stop(); err != nil {
+				logx.Error("update: stopping Postgres: %v", err)
+			}
+		}()
 	}
 
-	runMigrate(nil)
+	logx.Info("update: applying migrations")
+	if err := migrate.Up(ctx, connString); err != nil {
+		if isUnreachableDB(err) {
+			logx.Fatal("could not reach the database at %s - is Postgres running?", redactDBURL(connString))
+		}
+		logx.Fatal("update: %v", err)
+	}
 
-	if *noStart {
-		logx.Info("update: migrations applied - start the service when you're ready")
+	version, verr := migrate.Version(ctx, connString)
+	if verr != nil {
+		logx.Info("Server migrated!")
 		return
 	}
-	startWith(*headless)
+	logx.Info("Server migrated to version %d!", version)
 }
 
-func startWith(headless bool) {
-	if headless {
-		runStart([]string{"--headless"})
-		return
-	}
-	runStart(nil)
-}
-
-// embeddedBackend reports whether this host runs the server-managed Postgres.
-// Reads config the same way the server does (saved local config layered under
-// the environment); any failure answers "external", which is the default and the
-// safe assumption - at worst the caller gets the ordinary connect error.
-func embeddedBackend() bool {
+// loadEnvAndConfig layers the saved local config under the environment, the same
+// way the server does at startup, so `update` sees the same database either way.
+func loadEnvAndConfig() {
+	_ = godotenv.Load()
 	if dir, err := setup.DataDir(); err == nil {
 		if fc, ferr := setup.Load(dir); ferr == nil {
 			setup.EnsureSecret(fc)
 			fc.Apply()
 		}
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return false
-	}
-	return cfg.DBBackend == "embedded"
 }

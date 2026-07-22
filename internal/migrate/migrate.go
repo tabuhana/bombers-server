@@ -77,3 +77,24 @@ func Up(ctx context.Context, connString string) error {
 	}
 	return nil
 }
+
+// Version reports the schema version currently recorded in the database. Used by
+// `bombers update` to state plainly where the schema ended up.
+func Version(ctx context.Context, connString string) (int64, error) {
+	db, err := sql.Open("pgx", connString)
+	if err != nil {
+		return 0, fmt.Errorf("open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	goose.SetLogger(goose.NopLogger())
+	goose.SetBaseFS(migrations.FS)
+	if err := goose.SetDialect("postgres"); err != nil {
+		return 0, fmt.Errorf("set goose dialect: %w", err)
+	}
+	v, err := goose.GetDBVersionContext(ctx, db)
+	if err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return v, nil
+}
