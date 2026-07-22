@@ -1,0 +1,9 @@
+{
+  "id": "sample-game",
+  "name": "Sample Game",
+  "version": "0.1.0",
+  "description": "A minimal activity — the shape a published game takes.",
+  "category": "Examples",
+  "players": { "min": 1, "max": 4 },
+  "modes": ["solo", "online"]
+}

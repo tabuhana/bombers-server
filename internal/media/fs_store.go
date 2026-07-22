@@ -2,10 +2,12 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // FSStore is a filesystem-backed media Store: raw bytes on local disk, no S3,
@@ -117,6 +119,80 @@ func (s *FSStore) Ping(ctx context.Context) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("media dir %q is not a directory", s.dir)
+	}
+	return nil
+}
+
+// ── the generic object surface (activity assets) ─────────────────────────────
+//
+// Same key scheme as S3, so the two backends stay drop-in interchangeable: the
+// key is a forward-slash path, cleaned into OS separators under the media dir.
+// Keys are validated by the caller (see the activities domain) — this layer
+// still refuses anything that would escape the root, because a path traversal
+// through a published bundle would be the worst kind of bug.
+
+func (s *FSStore) objectPath(key string) (string, error) {
+	clean := filepath.Clean("/" + strings.ReplaceAll(key, "\\", "/"))
+	if clean == "/" {
+		return "", fmt.Errorf("media: empty object key")
+	}
+	return filepath.Join(s.dir, filepath.FromSlash(clean)), nil
+}
+
+// PutObject writes (or replaces) an object at an explicit key.
+func (s *FSStore) PutObject(_ context.Context, key string, data []byte, _ string) error {
+	target, err := s.objectPath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return fmt.Errorf("create object dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".obj.tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp object: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write object: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("close object: %w", err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("replace object: %w", err)
+	}
+	return nil
+}
+
+// GetObject opens an object by key; a missing one is ErrObjectNotFound.
+func (s *FSStore) GetObject(_ context.Context, key string) (io.ReadCloser, error) {
+	target, err := s.objectPath(key)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrObjectNotFound
+		}
+		return nil, fmt.Errorf("open object: %w", err)
+	}
+	return f, nil
+}
+
+// RemovePrefix deletes everything under a key prefix (an activity's assets).
+func (s *FSStore) RemovePrefix(_ context.Context, prefix string) error {
+	target, err := s.objectPath(prefix)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return fmt.Errorf("remove objects: %w", err)
 	}
 	return nil
 }

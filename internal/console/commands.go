@@ -31,6 +31,9 @@ func builtins() []command {
 		{name: "store", help: "list store-published nodes (id, name, version)", run: runStore},
 		{name: "publish", help: "publish <path> — put a {manifest, files} JSON bundle in the node store", run: runPublish},
 		{name: "unpublish", help: "unpublish <id> — remove a node from the store", run: runUnpublish},
+		{name: "games", aliases: []string{"activities"}, help: "list published games", run: runGames},
+		{name: "publish-game", help: "publish-game <folder> — publish a game (manifest.json + source + assets/)", run: runPublishGame},
+		{name: "unpublish-game", help: "unpublish-game <id> — remove a game and its assets", run: runUnpublishGame},
 		{name: "stop", aliases: []string{"quit", "exit"}, help: "gracefully shut the server down", run: runStop},
 	}
 }

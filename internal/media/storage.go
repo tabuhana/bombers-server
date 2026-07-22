@@ -33,6 +33,14 @@ type Store interface {
 	Get(ctx context.Context, userID, kind string) (io.ReadCloser, error)
 	Remove(ctx context.Context, userID, kind string) error
 	Ping(ctx context.Context) error
+
+	// The generic object surface, for bytes that aren't a user's media kind —
+	// today, an activity's assets (sprites, audio) which belong to a published
+	// GAME rather than to a person. Same bucket, same authenticated
+	// pass-through rule; only the key namespace differs.
+	PutObject(ctx context.Context, key string, data []byte, contentType string) error
+	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
+	RemovePrefix(ctx context.Context, prefix string) error
 }
 
 // Storage is the thin S3 wrapper the handlers use. It speaks the plain S3 API
@@ -75,6 +83,50 @@ func NewStorage(ctx context.Context, endpoint, accessKey, secretKey, bucket stri
 // replace semantics the API promises.
 func objectKey(userID, kind string) string {
 	return fmt.Sprintf("users/%s/%s", userID, kind)
+}
+
+// PutObject writes (or overwrites) an object at an explicit key.
+func (s *Storage) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
+	_, err := s.client.PutObject(ctx, s.bucket, key,
+		bytes.NewReader(data), int64(len(data)),
+		minio.PutObjectOptions{ContentType: contentType})
+	if err != nil {
+		return fmt.Errorf("put object: %w", err)
+	}
+	return nil
+}
+
+// GetObject opens an object by key. A missing object is ErrObjectNotFound.
+func (s *Storage) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get object: %w", err)
+	}
+	// minio-go defers the request, so a missing object only surfaces on the
+	// first read/stat — check now so callers get a clean error.
+	if _, err := obj.Stat(); err != nil {
+		_ = obj.Close()
+		if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+			return nil, ErrObjectNotFound
+		}
+		return nil, fmt.Errorf("stat object: %w", err)
+	}
+	return obj, nil
+}
+
+// RemovePrefix deletes every object under a key prefix (an activity's whole
+// asset folder when it's unpublished or republished).
+func (s *Storage) RemovePrefix(ctx context.Context, prefix string) error {
+	objects := s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true})
+	for obj := range objects {
+		if obj.Err != nil {
+			return fmt.Errorf("list objects: %w", obj.Err)
+		}
+		if err := s.client.RemoveObject(ctx, s.bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+			return fmt.Errorf("remove object: %w", err)
+		}
+	}
+	return nil
 }
 
 // Put writes (or overwrites) the object for a user's media kind.

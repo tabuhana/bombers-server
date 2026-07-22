@@ -25,6 +25,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/kardianos/service"
 
+	"github.com/tabuhana/bombers-server/internal/activities"
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/console"
@@ -377,6 +378,7 @@ func buildAndServe() (*app, error) {
 	nodeshareHandler := nodeshare.NewHandler(pool)
 	mediaHandler := media.NewHandler(pool, storage)
 	roomsHandler := rooms.NewHandler(pool, issuer)
+	activitiesHandler := activities.NewHandler(pool, storage)
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
@@ -445,6 +447,11 @@ func buildAndServe() (*app, error) {
 		// Creating a room is ordinary authed HTTP; the creator becomes its host
 		// (the referee). Rooms are in-memory and ephemeral - nothing persists.
 		r.Post("/rooms", roomsHandler.Create)
+		// The activity (game) store: browse, install, and fetch a game's assets.
+		// Publishing is console-only, exactly like the node store.
+		r.Get("/activities", activitiesHandler.List)
+		r.Get("/activities/{id}/bundle", activitiesHandler.Download)
+		r.Get("/activities/{id}/assets/*", activitiesHandler.Asset)
 	})
 
 	// Sweep rooms that have sat empty past the grace period. Rooms are in-memory,

@@ -34,6 +34,10 @@ var errStop = errors.New("stop requested")
 // the console decoupled from the media package (and trivially stubbable).
 type objectStore interface {
 	Ping(ctx context.Context) error
+	// Publishing a game writes its assets; unpublishing removes them. The
+	// console needs exactly this much of the media store and no more.
+	PutObject(ctx context.Context, key string, data []byte, contentType string) error
+	RemovePrefix(ctx context.Context, prefix string) error
 }
 
 // Console owns the interactive loop: a small registry of commands dispatched
