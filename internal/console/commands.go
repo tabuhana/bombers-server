@@ -34,6 +34,9 @@ func builtins() []command {
 		{name: "games", aliases: []string{"activities"}, help: "list published games", run: runGames},
 		{name: "publish-game", help: "publish-game <folder> — publish a game (manifest.json + source + assets/)", run: runPublishGame},
 		{name: "unpublish-game", help: "unpublish-game <id> — remove a game and its assets", run: runUnpublishGame},
+		{name: "packs", help: "list published look-and-feel packs", run: runPacks},
+		{name: "publish-pack", help: "publish-pack <folder> — publish a theme/sound pack (pack.json + sounds/ + wallpaper)", run: runPublishPack},
+		{name: "unpublish-pack", help: "unpublish-pack <id> — remove a pack and its assets", run: runUnpublishPack},
 		{name: "stop", aliases: []string{"quit", "exit"}, help: "gracefully shut the server down", run: runStop},
 	}
 }

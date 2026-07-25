@@ -1,0 +1,14 @@
+{
+  "id": "sample-pack",
+  "name": "Sample Pack",
+  "version": "0.1.0",
+  "author": "you",
+  "description": "A theme + sound pack — the shape a published pack takes.",
+  "theme": {
+    "--accent": "#c98b5e",
+    "--surface-fill": "#1c1a18",
+    "--text": "#efe7de",
+    "--radius-md": "10px"
+  },
+  "wallpaper": "wallpaper.png"
+}

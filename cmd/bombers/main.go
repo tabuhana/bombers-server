@@ -37,6 +37,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/migrate"
 	"github.com/tabuhana/bombers-server/internal/nodes"
 	"github.com/tabuhana/bombers-server/internal/nodeshare"
+	"github.com/tabuhana/bombers-server/internal/packs"
 	"github.com/tabuhana/bombers-server/internal/profiles"
 	"github.com/tabuhana/bombers-server/internal/rooms"
 	"github.com/tabuhana/bombers-server/internal/setup"
@@ -379,6 +380,7 @@ func buildAndServe() (*app, error) {
 	mediaHandler := media.NewHandler(pool, storage)
 	roomsHandler := rooms.NewHandler(pool, issuer)
 	activitiesHandler := activities.NewHandler(pool, storage)
+	packsHandler := packs.NewHandler(pool, storage)
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
@@ -452,6 +454,11 @@ func buildAndServe() (*app, error) {
 		r.Get("/activities", activitiesHandler.List)
 		r.Get("/activities/{id}/bundle", activitiesHandler.Download)
 		r.Get("/activities/{id}/assets/*", activitiesHandler.Asset)
+		// The pack store: downloadable themes + sound sets. Same shape as the
+		// activity store; publishing is console-only.
+		r.Get("/packs", packsHandler.List)
+		r.Get("/packs/{id}/bundle", packsHandler.Download)
+		r.Get("/packs/{id}/assets/*", packsHandler.Asset)
 	})
 
 	// Sweep rooms that have sat empty past the grace period. Rooms are in-memory,
