@@ -41,6 +41,13 @@ type Config struct {
 	TokenSecret       string
 	CorsAllowedOrigin string
 
+	// AdminUsername promotes that account to admin at boot. The escape hatch
+	// for a hosted deploy (Railway, a container) where attaching to the
+	// server's console to run `admin <user>` is awkward. Empty = no-op; an
+	// unknown name warns rather than failing the boot, since the usual order on
+	// a fresh deploy is "server up, then sign up".
+	AdminUsername string
+
 	// MediaBackend selects where media bytes live: "s3" (default — external/
 	// managed object storage) or "fs" (plain files on local disk, self-host).
 	// MediaDir is the filesystem root when the backend is "fs".
@@ -107,6 +114,7 @@ func Load() (*Config, error) {
 		DBBackend:         dbBackend,
 		TokenSecret:       require("TOKEN_SECRET"),
 		CorsAllowedOrigin: optional("CORS_ALLOWED_ORIGIN", defaultCorsAllowedOrigin),
+		AdminUsername:     os.Getenv("ADMIN_USERNAME"),
 		MediaBackend:      mediaBackend,
 		MediaDir:          optional("MEDIA_DIR", ""),
 		S3Endpoint:        optional("S3_ENDPOINT", defaultS3Endpoint),

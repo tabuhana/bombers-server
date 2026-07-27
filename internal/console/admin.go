@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/tabuhana/bombers-server/internal/admin"
 )
 
 // Operator commands that CHANGE a user: ban, unban, delete.
@@ -151,6 +153,68 @@ func runBanned(ctx context.Context, c *Console, _ []string) error {
 	}
 	if count == 0 {
 		fmt.Fprintln(c.out, "  nobody is banned")
+	}
+	return nil
+}
+
+// The ADMIN ROLE commands. The console is the root of trust for admin: it is
+// privileged by physical access, so granting the role here needs no auth and
+// there is deliberately no HTTP path to self-promotion. (ADMIN_USERNAME at boot
+// is the other way in — see internal/admin.)
+//
+// Admin is what lets operator actions be driven from the CLIENT: an admin can
+// publish to the node store over the API instead of copying a bundle onto this
+// machine.
+
+func runAdmin(ctx context.Context, c *Console, args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintln(c.out, "  usage: admin <username|id>")
+		return nil
+	}
+	username, err := admin.Set(ctx, c.pool, args[0], true)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%s is now an admin\n", username)
+	return nil
+}
+
+func runUnadmin(ctx context.Context, c *Console, args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintln(c.out, "  usage: unadmin <username|id>")
+		return nil
+	}
+	username, err := admin.Set(ctx, c.pool, args[0], false)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%s is no longer an admin\n", username)
+	return nil
+}
+
+func runAdmins(ctx context.Context, c *Console, _ []string) error {
+	rows, err := c.pool.Query(ctx,
+		`SELECT username, created_at FROM users WHERE is_admin ORDER BY username`)
+	if err != nil {
+		return fmt.Errorf("list admins: %w", err)
+	}
+	defer rows.Close()
+
+	n := 0
+	for rows.Next() {
+		var username string
+		var created time.Time
+		if err := rows.Scan(&username, &created); err != nil {
+			return fmt.Errorf("read admin row: %w", err)
+		}
+		fmt.Fprintf(c.out, "  %-20s  joined %s\n", username, created.Format("2006-01-02"))
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list admins: %w", err)
+	}
+	if n == 0 {
+		fmt.Fprintln(c.out, "  no admins yet — `admin <username>` grants it")
 	}
 	return nil
 }

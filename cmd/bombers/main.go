@@ -26,6 +26,7 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/tabuhana/bombers-server/internal/activities"
+	"github.com/tabuhana/bombers-server/internal/admin"
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/console"
@@ -338,6 +339,11 @@ func buildAndServe() (*app, error) {
 	}
 	logx.Info("db connected")
 
+	// ADMIN_USERNAME promotes that account at boot — the hosted-deploy path to a
+	// first admin, since attaching to the console isn't always practical there.
+	// Non-fatal by design (see admin.Bootstrap).
+	admin.Bootstrap(ctx, pool, cfg.AdminUsername)
+
 	// Media byte store (profile media) is part of the stack like Postgres is:
 	// unreachable/unusable at startup → fatal, same as the DB. The backend is a
 	// config pick — the local filesystem (self-host default) or S3-compatible
@@ -433,9 +439,17 @@ func buildAndServe() (*app, error) {
 		r.Get("/sync/pull", syncHandler.Pull)
 		r.Get("/sync/status", syncHandler.Status)
 		// The official node store: operator-published SDK bundles. Any authed
-		// user browses + installs; publishing is console-only (no HTTP publish).
+		// user browses + installs; PUBLISHING is admin-only (below).
 		r.Get("/nodes", nodesHandler.List)
 		r.Get("/nodes/{id}/bundle", nodesHandler.Download)
+		// Admin-only store curation — the console's publish/unpublish reached
+		// over HTTP, so an operator can publish from the client. Its own
+		// sub-router so RequireAdmin gates ONLY these two routes.
+		r.Group(func(r chi.Router) {
+			r.Use(admin.RequireAdmin(pool))
+			r.Post("/nodes", nodesHandler.Publish)
+			r.Delete("/nodes/{id}", nodesHandler.Unpublish)
+		})
 		// Friend node-sharing (the clone model): a one-way transfer inbox,
 		// friend-gated — separate from the public node-store catalog above.
 		r.Post("/nodes/send", nodeshareHandler.Send)
