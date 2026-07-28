@@ -25,8 +25,11 @@ import (
 //
 // pack.json is the bundle the client reads (theme variables live inside it);
 // sounds/ and wallpaper.* are uploaded byte-for-byte to object storage.
-
-const maxPackAssetBytes = 8 << 20 // 8 MiB — a sound clip or a wallpaper, not a video.
+//
+// This is one of TWO ways into the same operation — the other is the admin-
+// gated POST /packs + PUT /packs/{id}/assets/*, for publishing from the client.
+// The size caps live in the packs package so the two can't disagree about what
+// fits.
 
 func runPacks(ctx context.Context, c *Console, _ []string) error {
 	records, err := packs.List(ctx, c.pool)
@@ -182,8 +185,8 @@ func readPackAssets(dir string) ([]pendingAsset, error) {
 		if !packs.ValidAssetPath(rel) {
 			return fmt.Errorf("asset path %q is not allowed", rel)
 		}
-		if info.Size() > maxPackAssetBytes {
-			return fmt.Errorf("asset %s is %s; the limit is %s", rel, humanBytes(info.Size()), humanBytes(maxPackAssetBytes))
+		if info.Size() > packs.AssetLimit {
+			return fmt.Errorf("asset %s is %s; the limit is %s", rel, humanBytes(info.Size()), humanBytes(packs.AssetLimit))
 		}
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {

@@ -469,10 +469,20 @@ func buildAndServe() (*app, error) {
 		r.Get("/activities/{id}/bundle", activitiesHandler.Download)
 		r.Get("/activities/{id}/assets/*", activitiesHandler.Asset)
 		// The pack store: downloadable themes + sound sets. Same shape as the
-		// activity store; publishing is console-only.
+		// activity store; any authed user browses and installs.
 		r.Get("/packs", packsHandler.List)
 		r.Get("/packs/{id}/bundle", packsHandler.Download)
 		r.Get("/packs/{id}/assets/*", packsHandler.Asset)
+		// Admin-only pack curation — the console's publish-pack/unpublish-pack
+		// reached over HTTP, so an operator can publish from the client. It takes
+		// TWO steps where the node store took one, because a pack carries binary
+		// assets: pack.json first, then one raw-bytes PUT per sound/wallpaper.
+		r.Group(func(r chi.Router) {
+			r.Use(admin.RequireAdmin(pool))
+			r.Post("/packs", packsHandler.Publish)
+			r.Put("/packs/{id}/assets/*", packsHandler.PublishAsset)
+			r.Delete("/packs/{id}", packsHandler.Unpublish)
+		})
 	})
 
 	// Sweep rooms that have sat empty past the grace period. Rooms are in-memory,

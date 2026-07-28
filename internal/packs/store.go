@@ -22,9 +22,15 @@ import (
 // ErrNotFound is returned for an unknown pack or asset.
 var ErrNotFound = errors.New("pack not found")
 
-// maxBundleBytes caps one published bundle. Source code, not media — assets are
-// separate objects, so this stays small on purpose.
-const maxBundleBytes = 4 << 20 // 4 MiB
+// BundleLimit caps one published bundle. pack.json is metadata and theme
+// variables, not media — assets are separate objects — so this stays small on
+// purpose. Same ceiling the node store gives its bundles.
+const BundleLimit = 4 << 20 // 4 MiB
+
+// AssetLimit caps ONE asset file: a sound clip or a wallpaper, not a video.
+// Both publish paths (the console's folder walk and the HTTP upload) measure
+// against this, so the two can never disagree about what fits.
+const AssetLimit = 8 << 20 // 8 MiB
 
 // Record is a published pack as stored.
 type Record struct {
@@ -45,6 +51,28 @@ type Asset struct {
 // both the writer and the reader, so they can never disagree.
 func AssetKey(packID, path string) string {
 	return fmt.Sprintf("packs/%s/%s", packID, path)
+}
+
+// ValidPackID guards the other half of an object key. The id is the FOLDER
+// every one of a pack's assets lands in, and it comes out of pack.json — which,
+// now that publishing is reachable over HTTP, means it comes out of a request
+// body. An id carrying a slash or a dot segment would escape packs/ exactly as
+// a bad asset path would, so it gets the same narrow, positive treatment.
+func ValidPackID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	// No separators are possible above, so only a bare dot id could still name
+	// a directory rather than a pack.
+	return id != "." && id != ".."
 }
 
 // ValidAssetPath guards the one genuinely dangerous input here: a path that
@@ -78,8 +106,8 @@ ON CONFLICT (id) DO UPDATE SET
 
 // Upsert publishes (or republishes) a pack.
 func Upsert(ctx context.Context, pool *pgxpool.Pool, rec Record) error {
-	if len(rec.Bundle) > maxBundleBytes {
-		return fmt.Errorf("bundle is %d bytes; the limit is %d", len(rec.Bundle), maxBundleBytes)
+	if len(rec.Bundle) > BundleLimit {
+		return fmt.Errorf("bundle is %d bytes; the limit is %d", len(rec.Bundle), BundleLimit)
 	}
 	if _, err := pool.Exec(ctx, upsertSQL, rec.ID, rec.Name, rec.Version, rec.Bundle); err != nil {
 		return fmt.Errorf("publish pack: %w", err)
@@ -119,6 +147,19 @@ func List(ctx context.Context, pool *pgxpool.Pool) ([]Record, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+const existsSQL = `SELECT EXISTS (SELECT 1 FROM packs WHERE id = $1)`
+
+// Exists reports whether a pack is published without pulling its bundle — what
+// an asset upload needs to know before it writes anything, since an asset only
+// means something as part of a published pack.
+func Exists(ctx context.Context, pool *pgxpool.Pool, id string) (bool, error) {
+	var found bool
+	if err := pool.QueryRow(ctx, existsSQL, id).Scan(&found); err != nil {
+		return false, fmt.Errorf("check pack: %w", err)
+	}
+	return found, nil
 }
 
 const getSQL = `SELECT id, name, version, bundle FROM packs WHERE id = $1`
@@ -164,6 +205,16 @@ func ReplaceAssets(ctx context.Context, pool *pgxpool.Pool, packID string, asset
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// UpsertAsset records ONE asset. An HTTP publish uploads assets a request at a
+// time, so it needs a single-row write: ReplaceAssets states the whole set at
+// once and would delete everything uploaded so far.
+func UpsertAsset(ctx context.Context, pool *pgxpool.Pool, packID string, a Asset) error {
+	if _, err := pool.Exec(ctx, insertAssetSQL, packID, a.Path, a.ContentType, a.Size); err != nil {
+		return fmt.Errorf("record asset %q: %w", a.Path, err)
+	}
+	return nil
 }
 
 const listAssetsSQL = `
