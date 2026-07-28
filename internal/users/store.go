@@ -85,7 +85,7 @@ func getUserByCanonical(ctx context.Context, pool *pgxpool.Pool, canonical strin
 }
 
 const getUserByIDSQL = `
-SELECT id, username, username_canonical, password_hash, friend_code, created_at
+SELECT id, username, username_canonical, password_hash, friend_code, created_at, is_admin
 FROM users
 WHERE id = $1
 `
@@ -95,7 +95,7 @@ WHERE id = $1
 func getUserByID(ctx context.Context, pool *pgxpool.Pool, id string) (*User, error) {
 	var u User
 	err := pool.QueryRow(ctx, getUserByIDSQL, id).Scan(
-		&u.ID, &u.Username, &u.UsernameCanonical, &u.PasswordHash, &u.FriendCode, &u.CreatedAt,
+		&u.ID, &u.Username, &u.UsernameCanonical, &u.PasswordHash, &u.FriendCode, &u.CreatedAt, &u.IsAdmin,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound

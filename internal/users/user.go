@@ -16,6 +16,8 @@ type User struct {
 	PasswordHash      string
 	FriendCode        string
 	CreatedAt         time.Time
+	// IsAdmin mirrors users.is_admin — the operator role (see internal/admin).
+	IsAdmin bool
 	// Banned mirrors `banned_at IS NOT NULL`. Checked at the doors (login,
 	// refresh) rather than on every request — see the ban migration.
 	Banned bool
@@ -27,5 +29,6 @@ func (u *User) Public() types.PublicUser {
 		Username:   u.Username,
 		FriendCode: u.FriendCode,
 		CreatedAt:  u.CreatedAt,
+		IsAdmin:    u.IsAdmin,
 	}
 }

@@ -14,4 +14,8 @@ type PublicUser struct {
 	Username   string    `json:"username"`
 	FriendCode string    `json:"friend_code"`
 	CreatedAt  time.Time `json:"created_at"`
+	// IsAdmin lets the CLIENT know whether to offer operator actions at all —
+	// the server still enforces them, this just stops the UI showing a door
+	// that won't open.
+	IsAdmin bool `json:"is_admin"`
 }
