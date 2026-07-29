@@ -94,6 +94,11 @@ func ValidAssetPath(p string) bool {
 	return true
 }
 
+// MaxThemesPerPack caps a theme pack's family. Kept in step with the client's
+// MAX_THEMES_PER_PACK: the biggest real families run to about six variants, so
+// this fits them twice over, and anything past it is honestly two packs.
+const MaxThemesPerPack = 12
+
 const upsertSQL = `
 INSERT INTO packs (id, name, version, bundle, updated_at)
 VALUES ($1, $2, $3, $4, NOW())

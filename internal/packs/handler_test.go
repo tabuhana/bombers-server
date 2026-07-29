@@ -242,6 +242,12 @@ func TestPublishRefusesMalformedPacks(t *testing.T) {
 		{"no id or name", `{}`, http.StatusBadRequest, errInvalidPackManifest},
 		{"id but no name", `{"id":"midnight"}`, http.StatusBadRequest, errInvalidPackManifest},
 		{"a whitespace name", `{"id":"midnight","name":"  "}`, http.StatusBadRequest, errInvalidPackManifest},
+		{
+			"a theme family over the cap",
+			`{"id":"huge","name":"Huge","themes":[` + strings.TrimSuffix(strings.Repeat(`{},`, MaxThemesPerPack+1), ",") + `]}`,
+			http.StatusBadRequest,
+			errTooManyThemes,
+		},
 		{"an id that escapes packs/", `{"id":"../users","name":"Midnight"}`, http.StatusBadRequest, errInvalidPackID},
 		{"over the bundle cap", `{"id":"midnight","name":"` + strings.Repeat("a", BundleLimit) + `"}`, http.StatusRequestEntityTooLarge, errBundleTooLarge},
 	}

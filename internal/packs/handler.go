@@ -32,6 +32,7 @@ const (
 	errInvalidPackID       = "invalid_pack_id"
 	errInvalidPackJSON     = "invalid_pack_json"
 	errInvalidPackManifest = "invalid_pack_manifest"
+	errTooManyThemes       = "too_many_themes"
 	errInvalidAssetPath    = "invalid_asset_path"
 	errBundleTooLarge      = "bundle_too_large"
 	errAssetTooLarge       = "asset_too_large"
@@ -50,14 +51,18 @@ func NewHandler(pool *pgxpool.Pool, storage media.Store) *Handler {
 // catalogEntry is the listing shape: enough to render a library row and decide
 // whether to install, without shipping a single line of source or a byte of art.
 type catalogEntry struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Description string   `json:"description,omitempty"`
-	Category    string   `json:"category,omitempty"`
-	Assets      int      `json:"assets"`
-	AssetBytes  int64    `json:"asset_bytes"`
-	Players     *players `json:"players,omitempty"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description,omitempty"`
+	Category    string `json:"category,omitempty"`
+	// Kind is "theme" or "sound". A theme pack is values only — nothing to
+	// download but its JSON — while a sound pack exists because audio has to be
+	// fetched. The client groups the library by this.
+	Kind       string   `json:"kind,omitempty"`
+	Assets     int      `json:"assets"`
+	AssetBytes int64    `json:"asset_bytes"`
+	Players    *players `json:"players,omitempty"`
 }
 
 type players struct {
@@ -72,8 +77,31 @@ type manifestFields struct {
 	Manifest struct {
 		Description string   `json:"description"`
 		Category    string   `json:"category"`
+		Kind        string   `json:"kind"`
 		Players     *players `json:"players"`
+		// Only their COUNT is read, to infer the kind for a pack that predates
+		// the `kind` field — the themes themselves stay opaque like the rest.
+		Themes []struct{}     `json:"themes"`
+		Theme  map[string]any `json:"theme"`
 	} `json:"manifest"`
+}
+
+// packKind reports what a pack is, inferring it when the manifest doesn't say.
+// Mirrors the client's rule so both halves agree: values → theme, files → sound.
+func packKind(fields manifestFields, assetCount int) string {
+	switch fields.Manifest.Kind {
+	case "theme", "sound":
+		return fields.Manifest.Kind
+	}
+	if len(fields.Manifest.Themes) > 0 || len(fields.Manifest.Theme) > 0 {
+		return "theme"
+	}
+	if assetCount > 0 {
+		return "sound"
+	}
+	// Nothing to go on — a pack with neither values nor files is a sound pack
+	// waiting for its clips, which is the friendlier of the two guesses.
+	return "sound"
 }
 
 // List → GET /packs : the catalogue.
@@ -102,6 +130,9 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 				entry.AssetBytes += a.Size
 			}
 		}
+		// After the asset count, since the count is part of the inference for a
+		// pack that predates the `kind` field.
+		entry.Kind = packKind(fields, entry.Assets)
 		out = append(out, entry)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"packs": out})
@@ -222,6 +253,9 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 		ID      string `json:"id"`
 		Name    string `json:"name"`
 		Version string `json:"version"`
+		// Counted, not interpreted: a theme pack ships a FAMILY, and the cap is
+		// what keeps one download from flooding the user's theme list.
+		Themes []struct{} `json:"themes"`
 	}
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, errInvalidPackJSON)
@@ -236,6 +270,10 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ValidPackID(id) {
 		httpx.WriteError(w, http.StatusBadRequest, errInvalidPackID)
+		return
+	}
+	if len(manifest.Themes) > MaxThemesPerPack {
+		httpx.WriteError(w, http.StatusBadRequest, errTooManyThemes)
 		return
 	}
 
