@@ -59,7 +59,12 @@ type catalogEntry struct {
 	// Kind is "theme" or "sound". A theme pack is values only — nothing to
 	// download but its JSON — while a sound pack exists because audio has to be
 	// fetched. The client groups the library by this.
-	Kind       string   `json:"kind,omitempty"`
+	Kind string `json:"kind,omitempty"`
+	// Swatch is a few colours from a theme pack's FIRST variant, so the store can
+	// draw a real palette thumbnail before anything is downloaded. Without it a
+	// library of theme packs is a list of names, and you'd have to install one to
+	// find out what it looks like.
+	Swatch     []string `json:"swatch,omitempty"`
 	Assets     int      `json:"assets"`
 	AssetBytes int64    `json:"asset_bytes"`
 	Players    *players `json:"players,omitempty"`
@@ -79,11 +84,39 @@ type manifestFields struct {
 		Category    string   `json:"category"`
 		Kind        string   `json:"kind"`
 		Players     *players `json:"players"`
-		// Only their COUNT is read, to infer the kind for a pack that predates
-		// the `kind` field — the themes themselves stay opaque like the rest.
-		Themes []struct{}     `json:"themes"`
-		Theme  map[string]any `json:"theme"`
+		// Read shallowly: the COUNT infers the kind for a pack that predates the
+		// `kind` field, and the first variant's palette becomes the listing
+		// thumbnail. Everything else about a theme stays opaque, like the rest of
+		// the bundle.
+		Themes []struct {
+			Theme map[string]string `json:"theme"`
+		} `json:"themes"`
+		Theme map[string]string `json:"theme"`
 	} `json:"manifest"`
+}
+
+// swatchKeys are the tokens a thumbnail needs, in painting order: the ground, a
+// panel on it, the accent, and the text colour.
+var swatchKeys = []string{"--bg", "--surface", "--accent", "--text"}
+
+// packSwatch pulls a listing thumbnail out of a theme pack's first variant,
+// falling back to the legacy single-theme shape. Nil for a sound pack, which has
+// no palette to show.
+func packSwatch(fields manifestFields) []string {
+	palette := fields.Manifest.Theme
+	if len(fields.Manifest.Themes) > 0 {
+		palette = fields.Manifest.Themes[0].Theme
+	}
+	if len(palette) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(swatchKeys))
+	for _, k := range swatchKeys {
+		if v, ok := palette[k]; ok && v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // packKind reports what a pack is, inferring it when the manifest doesn't say.
@@ -133,6 +166,9 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		// After the asset count, since the count is part of the inference for a
 		// pack that predates the `kind` field.
 		entry.Kind = packKind(fields, entry.Assets)
+		if entry.Kind == "theme" {
+			entry.Swatch = packSwatch(fields)
+		}
 		out = append(out, entry)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"packs": out})
