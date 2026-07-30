@@ -64,7 +64,11 @@ type catalogEntry struct {
 	// draw a real palette thumbnail before anything is downloaded. Without it a
 	// library of theme packs is a list of names, and you'd have to install one to
 	// find out what it looks like.
-	Swatch     []string `json:"swatch,omitempty"`
+	Swatch []string `json:"swatch,omitempty"`
+	// Themes is how many looks a theme pack carries. The client says "Theme pack"
+	// for a family and "Theme" for a single one, and it has to say that BEFORE you
+	// install — so the count travels with the listing.
+	Themes     int      `json:"themes,omitempty"`
 	Assets     int      `json:"assets"`
 	AssetBytes int64    `json:"asset_bytes"`
 	Players    *players `json:"players,omitempty"`
@@ -168,6 +172,11 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		entry.Kind = packKind(fields, entry.Assets)
 		if entry.Kind == "theme" {
 			entry.Swatch = packSwatch(fields)
+			// A legacy single-`theme` pack counts as one, which is exactly what it
+			// is — one look, published before families existed.
+			if entry.Themes = len(fields.Manifest.Themes); entry.Themes == 0 && len(fields.Manifest.Theme) > 0 {
+				entry.Themes = 1
+			}
 		}
 		out = append(out, entry)
 	}
