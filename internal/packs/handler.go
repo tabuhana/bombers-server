@@ -83,20 +83,45 @@ type players struct {
 // server still doesn't interpret the bundle — it reads a few descriptive keys
 // for the listing and passes everything else through untouched.
 type manifestFields struct {
-	Manifest struct {
-		Description string   `json:"description"`
-		Category    string   `json:"category"`
-		Kind        string   `json:"kind"`
-		Players     *players `json:"players"`
-		// Read shallowly: the COUNT infers the kind for a pack that predates the
-		// `kind` field, and the first variant's palette becomes the listing
-		// thumbnail. Everything else about a theme stays opaque, like the rest of
-		// the bundle.
-		Themes []struct {
-			Theme map[string]string `json:"theme"`
-		} `json:"themes"`
+	Description string   `json:"description"`
+	Category    string   `json:"category"`
+	Kind        string   `json:"kind"`
+	Players     *players `json:"players"`
+	// Read shallowly: the COUNT infers the kind for a pack that predates the
+	// `kind` field, and the first variant's palette becomes the listing
+	// thumbnail. Everything else about a theme stays opaque, like the rest of
+	// the bundle.
+	Themes []struct {
 		Theme map[string]string `json:"theme"`
-	} `json:"manifest"`
+	} `json:"themes"`
+	Theme map[string]string `json:"theme"`
+}
+
+// readManifest pulls those keys out of a stored bundle.
+//
+// A pack's bundle IS its pack.json, so the keys sit at the TOP LEVEL — unlike
+// the node and activity stores, whose bundle wraps a `manifest` object. Reading
+// the wrapped shape here was a silent mis-parse: every pack came back with no
+// kind and no description, and the kind inference then fell through to its
+// last-resort "sound", which is how a family of themes ended up labelled a sound
+// pack in the client's store. Both shapes are accepted so a bundle published
+// either way reads the same.
+func readManifest(bundle []byte) manifestFields {
+	var flat manifestFields
+	if err := json.Unmarshal(bundle, &flat); err == nil && !flat.empty() {
+		return flat
+	}
+	var wrapped struct {
+		Manifest manifestFields `json:"manifest"`
+	}
+	_ = json.Unmarshal(bundle, &wrapped)
+	return wrapped.Manifest
+}
+
+// empty reports that nothing the catalogue cares about was found — the signal to
+// try the other bundle shape.
+func (m manifestFields) empty() bool {
+	return m.Kind == "" && m.Description == "" && m.Category == "" && len(m.Themes) == 0 && len(m.Theme) == 0
 }
 
 // swatchKeys are the tokens a thumbnail needs, in painting order: the ground, a
@@ -107,9 +132,9 @@ var swatchKeys = []string{"--bg", "--surface", "--accent", "--text"}
 // falling back to the legacy single-theme shape. Nil for a sound pack, which has
 // no palette to show.
 func packSwatch(fields manifestFields) []string {
-	palette := fields.Manifest.Theme
-	if len(fields.Manifest.Themes) > 0 {
-		palette = fields.Manifest.Themes[0].Theme
+	palette := fields.Theme
+	if len(fields.Themes) > 0 {
+		palette = fields.Themes[0].Theme
 	}
 	if len(palette) == 0 {
 		return nil
@@ -126,11 +151,11 @@ func packSwatch(fields manifestFields) []string {
 // packKind reports what a pack is, inferring it when the manifest doesn't say.
 // Mirrors the client's rule so both halves agree: values → theme, files → sound.
 func packKind(fields manifestFields, assetCount int) string {
-	switch fields.Manifest.Kind {
+	switch fields.Kind {
 	case "theme", "sound":
-		return fields.Manifest.Kind
+		return fields.Kind
 	}
-	if len(fields.Manifest.Themes) > 0 || len(fields.Manifest.Theme) > 0 {
+	if len(fields.Themes) > 0 || len(fields.Theme) > 0 {
 		return "theme"
 	}
 	if assetCount > 0 {
@@ -153,12 +178,10 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	out := make([]catalogEntry, 0, len(records))
 	for _, rec := range records {
 		entry := catalogEntry{ID: rec.ID, Name: rec.Name, Version: rec.Version}
-		var fields manifestFields
-		if err := json.Unmarshal(rec.Bundle, &fields); err == nil {
-			entry.Description = fields.Manifest.Description
-			entry.Category = fields.Manifest.Category
-			entry.Players = fields.Manifest.Players
-		}
+		fields := readManifest(rec.Bundle)
+		entry.Description = fields.Description
+		entry.Category = fields.Category
+		entry.Players = fields.Players
 		// The download size matters here: a pack with art is a real download,
 		// and the library should say so before you commit to it.
 		if assets, aerr := ListAssets(r.Context(), h.pool, rec.ID); aerr == nil {
@@ -174,7 +197,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			entry.Swatch = packSwatch(fields)
 			// A legacy single-`theme` pack counts as one, which is exactly what it
 			// is — one look, published before families existed.
-			if entry.Themes = len(fields.Manifest.Themes); entry.Themes == 0 && len(fields.Manifest.Theme) > 0 {
+			if entry.Themes = len(fields.Themes); entry.Themes == 0 && len(fields.Theme) > 0 {
 				entry.Themes = 1
 			}
 		}

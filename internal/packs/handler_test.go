@@ -274,6 +274,71 @@ func TestPublishRefusesMalformedPacks(t *testing.T) {
 	}
 }
 
+// A pack's bundle IS its pack.json — the descriptive keys are at the TOP level,
+// not under a `manifest` object the way the node and activity stores wrap
+// theirs. Reading the wrong shape doesn't fail loudly: every field comes back
+// empty and the kind inference quietly answers "sound", which is how a family of
+// themes ended up labelled a sound pack in the client's store. This pins the
+// real published shape.
+func TestReadManifestReadsTheRealPackShape(t *testing.T) {
+	packJSON := []byte(`{
+		"id": "ayu-themes",
+		"name": "Ayu Themes",
+		"version": "0.1.0",
+		"kind": "theme",
+		"description": "The Ayu family.",
+		"themes": [
+			{"id": "ayu-light", "name": "Ayu Light", "theme": {"--bg": "#FCFCFC", "--surface": "#F3F4F5", "--accent": "#FA8D3E", "--text": "#5C6166"}},
+			{"id": "ayu-dark", "name": "Ayu Dark", "theme": {"--bg": "#0B0E14"}}
+		]
+	}`)
+
+	fields := readManifest(packJSON)
+	if fields.Kind != "theme" {
+		t.Errorf("kind = %q, want theme", fields.Kind)
+	}
+	if fields.Description != "The Ayu family." {
+		t.Errorf("description = %q", fields.Description)
+	}
+	if len(fields.Themes) != 2 {
+		t.Fatalf("themes = %d, want 2", len(fields.Themes))
+	}
+	if got := packKind(fields, 0); got != "theme" {
+		t.Errorf("packKind = %q, want theme", got)
+	}
+	want := []string{"#FCFCFC", "#F3F4F5", "#FA8D3E", "#5C6166"}
+	got := packSwatch(fields)
+	if len(got) != len(want) {
+		t.Fatalf("swatch = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("swatch[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// The wrapped shape still reads, so a bundle published the node/activity way
+// isn't suddenly unreadable.
+func TestReadManifestAcceptsAWrappedBundle(t *testing.T) {
+	fields := readManifest([]byte(`{"manifest":{"kind":"sound","description":"Clips."}}`))
+	if fields.Kind != "sound" || fields.Description != "Clips." {
+		t.Errorf("got %+v", fields)
+	}
+}
+
+// A sound pack has no theme values at all, so the inference has only the files
+// to go on — and must not be dragged to "theme" by the flat read.
+func TestPackKindOfASoundPack(t *testing.T) {
+	fields := readManifest([]byte(`{"id":"lol","name":"League Sounds","kind":"sound"}`))
+	if got := packKind(fields, 4); got != "sound" {
+		t.Errorf("packKind = %q, want sound", got)
+	}
+	if got := packSwatch(fields); got != nil {
+		t.Errorf("a sound pack has no swatch, got %v", got)
+	}
+}
+
 func TestValidPackID(t *testing.T) {
 	for _, ok := range []string{"midnight", "sample-pack", "pack_2", "v1.2", "A"} {
 		if !ValidPackID(ok) {
