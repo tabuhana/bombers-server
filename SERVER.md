@@ -231,7 +231,7 @@ These are settled — build to them, don't re-litigate:
 
 1. **Conflict mechanism:** exact divergence detection (per-item version vector? last-common-sync timestamp?). The active-note auto-pull exclusion keeps the common case safe, but the underlying divergence-detection mechanism still needs picking.
 2. **Games (server side):** deferred entirely. When picked up: how game bundles are stored/served, and whether the server relays opaque state, validates turns, or holds authority. Don't foreclose any of these now.
-3. **Rooms beyond messaging:** file sharing, file viewing, shared editing, etc. are anticipated but unspecified — design each when picked up. v1 is room-lifecycle + chat only.
+3. **Rooms beyond messaging:** file viewing and shared editing are anticipated but unspecified — design each when picked up. **File sharing is decided and is not one of them:** sending a friend a file goes **client to client over WebRTC**, with the room used only to relay the offer/answer/ICE candidates. The bytes never touch this server, because bandwidth is metered per gigabyte and a relayed video is paid for twice. No new signalling domain — `rooms` already forwards opaque frames between friends, which is exactly what signalling is. Client-side design in the client repo's `docs/TRANSFER.md`.
 4. **S3 / blob-storage phase (remaining slices):** profile media is done (see "Profile media"); still to design when picked up: photo libraries, DM image attachments, syncing note attachments across devices, and any room files — per-slice bucket layout, caps, and lifecycle.
 
 ## What to refuse / push back on (server-level)
@@ -241,6 +241,7 @@ These are settled — build to them, don't re-litigate:
 - ❌ Public discovery / username search. Friend codes only.
 - ❌ Media beyond the built profile slice (photo libraries, DM attachments, room files) before its S3-phase slice is actually picked up and designed — don't build piecemeal. And never serve media by handing out direct/presigned bucket URLs — pass-through only.
 - ❌ Persisting rooms past expiry.
+- ❌ Relaying friend-to-friend FILE TRANSFER bytes through the server. Signalling only (a few KB via `rooms`); the transfer itself is peer-to-peer. This will look like a reasonable convenience the first time someone's NAT misbehaves — it is the entire cost the design avoids.
 - ❌ OS push infrastructure. The server feeds in-app indicators only.
 - ❌ Baking Tauri-client assumptions into the API. The API is client-agnostic.
 - ❌ Over-engineering for scale. Tens of users.
