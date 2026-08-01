@@ -49,6 +49,9 @@ type Issuer struct {
 	secret     []byte
 	accessTTL  time.Duration
 	refreshTTL time.Duration
+	// Set at wiring time so RequireAuth can also accept API tokens. Nil on a
+	// server built without that domain, which then accepts sessions only.
+	tokens TokenResolver
 }
 
 // NewIssuer constructs an Issuer that signs with the given secret (raw

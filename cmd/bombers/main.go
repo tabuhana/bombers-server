@@ -27,6 +27,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/activities"
 	"github.com/tabuhana/bombers-server/internal/admin"
+	"github.com/tabuhana/bombers-server/internal/apitokens"
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/console"
@@ -387,6 +388,10 @@ func buildAndServe() (*app, error) {
 	roomsHandler := rooms.NewHandler(pool, issuer)
 	activitiesHandler := activities.NewHandler(pool, storage)
 	packsHandler := packs.NewHandler(pool, storage)
+	tokensHandler := apitokens.NewHandler(pool)
+	// RequireAuth now accepts an API token as well as a session JWT. Wired here
+	// rather than imported by `auth`, so the dependency points one way.
+	issuer.SetTokenResolver(tokensHandler)
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
@@ -398,6 +403,9 @@ func buildAndServe() (*app, error) {
 	r.Post("/auth/register", usersHandler.Register)
 	r.Post("/auth/login", usersHandler.Login)
 	r.Post("/auth/refresh", authHandler.Refresh)
+	// What a token may be granted. A constant, and a client needs it before it
+	// has anywhere to put a token, so it sits outside the auth group.
+	r.Get("/token-scopes", tokensHandler.Scopes)
 	// Activity rooms: the realtime relay. The JOIN is a WebSocket upgrade and so
 	// sits OUTSIDE the RequireAuth group - a webview cannot put an Authorization
 	// header on a socket, so the access token rides the `bearer` subprotocol and
@@ -407,41 +415,85 @@ func buildAndServe() (*app, error) {
 	r.Group(func(r chi.Router) {
 		r.Use(issuer.RequireAuth)
 		r.Get("/me", usersHandler.Me)
-		r.Get("/friends", friendsHandler.List)
-		r.Get("/friends/code", friendsHandler.MyCode)
-		r.Get("/friends/requests", friendsHandler.ListRequests)
+		// Token scope: browsing and downloading this server's shelves.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.StoreRead))
+			r.Get("/nodes", nodesHandler.List)
+			r.Get("/nodes/{id}/bundle", nodesHandler.Download)
+			r.Get("/activities", activitiesHandler.List)
+			r.Get("/activities/{id}/bundle", activitiesHandler.Download)
+			r.Get("/activities/{id}/assets/*", activitiesHandler.Asset)
+			r.Get("/packs", packsHandler.List)
+			r.Get("/packs/{id}/bundle", packsHandler.Download)
+			r.Get("/packs/{id}/assets/*", packsHandler.Asset)
+		})
+		// Token scope: writing published items.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.NotesWrite))
+			r.Post("/sync/push", syncHandler.Push)
+		})
+		// Token scope: your published items.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.NotesRead))
+			r.Get("/sync/pull", syncHandler.Pull)
+			r.Get("/sync/status", syncHandler.Status)
+		})
+		// Token scope: sending as you — the one action with a social consequence.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.MessagesWrite))
+			r.Post("/messages", messagingHandler.Send)
+		})
+		// Token scope: reading DMs.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.MessagesRead))
+			r.Get("/messages/unread", messagingHandler.Unread)
+			r.Get("/messages/{userID}", messagingHandler.History)
+		})
+		// Token scope: the cards you keep about people — the most personal thing here.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.PeopleRead))
+			r.Get("/me/profile", profilesHandler.GetMine)
+			r.Get("/me/profile/shares", profilesHandler.GetMyShares)
+			r.Get("/profiles/{userID}", profilesHandler.GetForUser)
+			r.Get("/me/about", profilesHandler.ListMyAbout)
+			r.Get("/me/about/{subjectID}", profilesHandler.GetMyAbout)
+			r.Get("/about/{authorID}", profilesHandler.GetSharedAbout)
+		})
+		// Token scope: the friend graph — who you know.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.FriendsRead))
+			r.Get("/friends", friendsHandler.List)
+			r.Get("/friends/code", friendsHandler.MyCode)
+			r.Get("/friends/requests", friendsHandler.ListRequests)
+		})
+		// Managing API tokens is SESSION-ONLY: a token must never be able to
+		// mint another token or revoke its own revocation. There is no scope
+		// that grants this, which is what keeps a leaked token bounded by what
+		// it was given.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.SessionOnly)
+			r.Get("/me/tokens", tokensHandler.List)
+			r.Post("/me/tokens", tokensHandler.Create)
+			r.Delete("/me/tokens/{id}", tokensHandler.Revoke)
+		})
 		r.Post("/friends/requests", friendsHandler.SendRequest)
 		r.Post("/friends/requests/{requesterID}/accept", friendsHandler.AcceptRequest)
 		r.Post("/friends/requests/{requesterID}/reject", friendsHandler.RejectRequest)
 		r.Delete("/friends/{userID}", friendsHandler.RemoveFriend)
 		r.Post("/friends/{userID}/block", friendsHandler.Block)
 		r.Post("/friends/{userID}/unblock", friendsHandler.Unblock)
-		r.Get("/me/profile", profilesHandler.GetMine)
 		r.Put("/me/profile", profilesHandler.UpdateMine)
 		// Per-field sharing: the client resolves its own relationship groups to
 		// friend ids and publishes the result; the server never sees a group.
-		r.Get("/me/profile/shares", profilesHandler.GetMyShares)
 		r.Put("/me/profile/shares", profilesHandler.PutMyShares)
-		r.Get("/profiles/{userID}", profilesHandler.GetForUser)
-		r.Get("/me/about", profilesHandler.ListMyAbout)
-		r.Get("/me/about/{subjectID}", profilesHandler.GetMyAbout)
 		r.Put("/me/about/{subjectID}", profilesHandler.UpsertMyAbout)
 		r.Delete("/me/about/{subjectID}", profilesHandler.DeleteMyAbout)
-		r.Get("/about/{authorID}", profilesHandler.GetSharedAbout)
-		r.Post("/messages", messagingHandler.Send)
 		// Static /messages/unread is registered before the /messages/{userID}
 		// param route so chi matches it first (it would anyway — static beats
 		// wildcard — but keep them together).
-		r.Get("/messages/unread", messagingHandler.Unread)
-		r.Get("/messages/{userID}", messagingHandler.History)
 		r.Post("/messages/{userID}/read", messagingHandler.MarkRead)
-		r.Post("/sync/push", syncHandler.Push)
-		r.Get("/sync/pull", syncHandler.Pull)
-		r.Get("/sync/status", syncHandler.Status)
 		// The official node store: operator-published SDK bundles. Any authed
 		// user browses + installs; PUBLISHING is admin-only (below).
-		r.Get("/nodes", nodesHandler.List)
-		r.Get("/nodes/{id}/bundle", nodesHandler.Download)
 		// Admin-only store curation — the console's publish/unpublish reached
 		// over HTTP, so an operator can publish from the client. Its own
 		// sub-router so RequireAdmin gates ONLY these two routes.
@@ -465,14 +517,8 @@ func buildAndServe() (*app, error) {
 		r.Post("/rooms", roomsHandler.Create)
 		// The activity (game) store: browse, install, and fetch a game's assets.
 		// Publishing is console-only, exactly like the node store.
-		r.Get("/activities", activitiesHandler.List)
-		r.Get("/activities/{id}/bundle", activitiesHandler.Download)
-		r.Get("/activities/{id}/assets/*", activitiesHandler.Asset)
 		// The pack store: downloadable themes + sound sets. Same shape as the
 		// activity store; any authed user browses and installs.
-		r.Get("/packs", packsHandler.List)
-		r.Get("/packs/{id}/bundle", packsHandler.Download)
-		r.Get("/packs/{id}/assets/*", packsHandler.Asset)
 		// Admin-only pack curation — the console's publish-pack/unpublish-pack
 		// reached over HTTP, so an operator can publish from the client. It takes
 		// TWO steps where the node store took one, because a pack carries binary
