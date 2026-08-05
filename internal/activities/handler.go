@@ -42,6 +42,13 @@ type catalogEntry struct {
 	Assets      int      `json:"assets"`
 	AssetBytes  int64    `json:"asset_bytes"`
 	Players     *players `json:"players,omitempty"`
+	// Where a game's art lives, by the asset path it ships under. Not the art
+	// itself — the paths, so a client can ask for those two files and skip the
+	// rest. Without them the only way to show a cover before installing would be
+	// to download the whole game, which is precisely what looking at a store
+	// page is meant to help you avoid.
+	Icon  string `json:"icon,omitempty"`
+	Cover string `json:"cover,omitempty"`
 }
 
 type players struct {
@@ -57,6 +64,8 @@ type manifestFields struct {
 		Description string   `json:"description"`
 		Category    string   `json:"category"`
 		Players     *players `json:"players"`
+		Icon        string   `json:"icon"`
+		Cover       string   `json:"cover"`
 	} `json:"manifest"`
 }
 
@@ -72,18 +81,32 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	out := make([]catalogEntry, 0, len(records))
 	for _, rec := range records {
 		entry := catalogEntry{ID: rec.ID, Name: rec.Name, Version: rec.Version}
+
+		// The download size matters here: a game with art is a real download,
+		// and the library should say so before you commit to it. The same query
+		// answers whether the art a manifest NAMES was actually shipped.
+		shipped := map[string]bool{}
+		if assets, aerr := ListAssets(r.Context(), h.pool, rec.ID); aerr == nil {
+			entry.Assets = len(assets)
+			for _, a := range assets {
+				entry.AssetBytes += a.Size
+				shipped[a.Path] = true
+			}
+		}
+
 		var fields manifestFields
 		if err := json.Unmarshal(rec.Bundle, &fields); err == nil {
 			entry.Description = fields.Manifest.Description
 			entry.Category = fields.Manifest.Category
 			entry.Players = fields.Manifest.Players
-		}
-		// The download size matters here: a game with art is a real download,
-		// and the library should say so before you commit to it.
-		if assets, aerr := ListAssets(r.Context(), h.pool, rec.ID); aerr == nil {
-			entry.Assets = len(assets)
-			for _, a := range assets {
-				entry.AssetBytes += a.Size
+			// Only advertise art that's really there. A manifest naming a file
+			// it forgot to ship would otherwise have every client fetch a 404
+			// for every listing, forever.
+			if shipped[fields.Manifest.Icon] {
+				entry.Icon = fields.Manifest.Icon
+			}
+			if shipped[fields.Manifest.Cover] {
+				entry.Cover = fields.Manifest.Cover
 			}
 		}
 		out = append(out, entry)

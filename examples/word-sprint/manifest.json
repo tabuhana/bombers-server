@@ -1,0 +1,8 @@
+{
+  "id": "word-sprint",
+  "name": "Word Sprint",
+  "version": "1.0.0",
+  "description": "A typing race. Alone against the clock, or side by side with friends.",
+  "category": "Typing",
+  "players": { "min": 1, "max": 8 }
+}
