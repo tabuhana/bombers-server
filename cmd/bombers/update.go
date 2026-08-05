@@ -2,8 +2,7 @@ package main
 
 import (
 	"context"
-	"os"
-	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -31,31 +30,44 @@ func runUpdate(_ []string) {
 	logx.Init()
 
 	// Rebuild from the checkout recorded at install time, so `bombers update`
-	// works from any directory. Then hand the migration to the NEW binary: the
-	// migrations are embedded in it, so the copy currently running has no idea
-	// the new one exists. That exec is the ONLY reason internalMigrateCmd
-	// exists — see main.go. There is no user-facing migrate command.
+	// works from any directory.
+	//
+	// Then migrate from that SAME checkout, in this process. The migrations are
+	// embedded in the binary, and this binary is by definition the old one — so
+	// its own embed is stale by the time it gets here. Reading them off disk
+	// solves that with nothing up its sleeve: `update` just built from those
+	// files, so they are the newest ones in existence.
+	//
+	// It used to rebuild and then exec the new binary with a hidden argument,
+	// which made a private command that could never be renamed — the OLD binary
+	// is the one choosing what to call, so any change to the name broke every
+	// installed copy that hadn't updated yet. There is no such command now, and
+	// nothing to keep in step.
 	if rec, rerr := loadInstallRecord(); rerr == nil {
 		if err := buildInto(rec.Source, rec.Binary); err != nil {
 			logx.Fatal("update: %v", err)
 		}
 		logx.Info("update: rebuilt %s", rec.Binary)
-		cmd := exec.Command(rec.Binary, internalMigrateCmd)
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil {
-			os.Exit(1)
-		}
+		migrateNow(filepath.Join(rec.Source, migrationsDir))
 		return
 	}
-	logx.Warn("update: no install record — migrating with this binary only (run `bombers install` to enable rebuilds)")
+	logx.Warn("update: no install record — migrating with this binary's own migrations (run `bombers install` to enable rebuilds)")
 
-	migrateNow()
+	migrateNow("")
 }
+
+// Where the .sql files live inside a source checkout — the directory the
+// `migrations` package embeds.
+const migrationsDir = "migrations"
 
 // migrateNow brings the schema up to date, starting the server's own Postgres
 // first when that's the backend (nothing is listening between server runs, so a
 // plain migrate would have nothing to connect to) and stopping it after.
-func migrateNow() {
+//
+// `dir` is a migrations directory to read from, or "" for the ones embedded in
+// this binary. A fresh `setup` uses the embed — the binary you just built IS the
+// newest thing there is — and `update` passes the checkout it rebuilt from.
+func migrateNow(dir string) {
 	cfg, err := config.Load()
 	if err != nil {
 		logx.Fatal("config: %v", err)
@@ -88,7 +100,7 @@ func migrateNow() {
 	}
 
 	logx.Info("update: applying migrations")
-	if err := migrate.Up(ctx, connString); err != nil {
+	if err := migrate.UpFrom(ctx, connString, dir); err != nil {
 		if isUnreachableDB(err) {
 			logx.Fatal("could not reach the database at %s - is Postgres running?", redactDBURL(connString))
 		}

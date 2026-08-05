@@ -111,8 +111,6 @@ func main() {
 		runSetup(rest)
 	case "doctor":
 		runDoctor(rest)
-	case internalMigrateCmd:
-		runMigrate(rest)
 	case "update":
 		runUpdate(rest)
 	case "install":
@@ -861,7 +859,9 @@ func runSetup(_ []string) {
 	// only migration a first-time install needs; later ones come with new code
 	// via `bombers update`.
 	fc.Apply()
-	migrateNow()
+	// The embed, not a checkout: a fresh install runs the binary you just built,
+	// so its own migrations are the newest that exist.
+	migrateNow("")
 
 	printSetupSummary(fc, dir)
 }
@@ -922,40 +922,18 @@ const (
 // is best-effort and every check prints a single status line. It exits 1 when
 // any check FAILs (so `bombers doctor && bombers start` gates a launch on a
 // clean bill of health); warnings and skips alone never fail.
-// runMigrate applies every pending schema migration and exits. It NEVER serves.
+// There is no migrate command, and no hidden one either.
 //
-// The migrations are embedded in this binary and applied through the goose
-// LIBRARY - the same code path embedded Postgres already uses at startup - so
-// updating an external/dockerised database no longer means installing the goose
-// CLI, exporting DATABASE_URL by hand, or remembering the -dir flag. Pull the
-// code, run this, start the server.
-//
-// It stays a deliberate step rather than something `start` does implicitly:
-// applying schema changes should be a thing you asked for.
-// runMigrate applies pending migrations and exits. It never serves.
+// Migrating is plumbing: `setup` brings the schema up on a fresh install and
+// `update` brings it up with new code, the same way there is no
+// `bombers connect-to-database`. `update` reads the migrations from the checkout
+// it just rebuilt from (migrate.UpFrom), which is why it needs no second process
+// and no argv token to smuggle one in.
 //
 // migrateNow handles both backends: with embedded Postgres nothing is listening
 // between server runs, so it starts the database, migrates, and stops it again.
 // (Refusing in that case, as this used to, made `update` impossible on a
 // self-hosted install.)
-// internalMigrateCmd is NOT a command. Migrating is plumbing — you run `update`,
-// or `setup` on a fresh install, and the schema comes up as part of that. There
-// is no `bombers migrate` any more, for the same reason there is no
-// `bombers connect-to-database`.
-//
-// It survives as an argv token only because `update` has no choice: the
-// migrations are EMBEDDED in the binary, and `update` is the OLD binary running.
-// It rebuilds, then has to ask the NEW one to migrate — and the only way to
-// reach into another process is to exec it with an argument. The leading
-// underscores are the signal that this is internal; it's absent from `help`, so
-// anything a user types lands on the unknown-command path.
-const internalMigrateCmd = "__migrate"
-
-func runMigrate(_ []string) {
-	loadEnvAndConfig()
-	logx.Init()
-	migrateNow()
-}
 
 // isUnreachableDB reports whether an error is "nothing is listening" rather than
 // a genuine migration failure.

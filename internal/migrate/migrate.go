@@ -29,6 +29,30 @@ import (
 // idempotent: a schema already at the latest version is a no-op ("schema up to
 // date"). goose reads the .sql files from the embedded FS rooted at ".".
 func Up(ctx context.Context, connString string) error {
+	return up(ctx, connString, "")
+}
+
+// UpFrom is Up, reading the migrations from a DIRECTORY on disk instead of the
+// ones embedded in this binary.
+//
+// It exists for `update`, which has a genuine chicken-and-egg problem: the
+// migrations are embedded, so the running binary only ever carries the ones it
+// was built with, and `update` is by definition the OLD binary. It used to solve
+// that by rebuilding and then exec'ing the NEW binary with a hidden argument —
+// which meant a private command existed forever, and any change to its name
+// broke every installed copy in the world, because the OLD binary is the one
+// choosing what to call.
+//
+// This is the same problem answered without a second process: `update` just
+// built from a checkout, so the newest migrations are sitting right there on
+// disk. Read them from source and there is nothing to exec and no command to
+// name.
+func UpFrom(ctx context.Context, connString, dir string) error {
+	return up(ctx, connString, dir)
+}
+
+// up does the work for both. An empty dir means the embedded FS.
+func up(ctx context.Context, connString, dir string) error {
 	db, err := sql.Open("pgx", connString)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -40,7 +64,19 @@ func Up(ctx context.Context, connString string) error {
 	// summary line below reports the outcome through logx. Errors are still
 	// surfaced — UpContext RETURNS them, it does not log-and-exit.
 	goose.SetLogger(goose.NopLogger())
-	goose.SetBaseFS(migrations.FS)
+
+	// The whole difference between the two entry points. goose reads real files
+	// unless you hand it a base FS, and the setting is global — so a directory
+	// run must CLEAR it rather than merely not set it, or an earlier embedded
+	// run in the same process would still be in force.
+	root := "."
+	if dir == "" {
+		goose.SetBaseFS(migrations.FS)
+	} else {
+		goose.SetBaseFS(nil)
+		root = dir
+	}
+
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("set goose dialect: %w", err)
 	}
@@ -54,7 +90,7 @@ func Up(ctx context.Context, connString string) error {
 		before = 0
 	}
 
-	if err := goose.UpContext(ctx, db, "."); err != nil {
+	if err := goose.UpContext(ctx, db, root); err != nil {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
 
@@ -66,7 +102,7 @@ func Up(ctx context.Context, connString string) error {
 		logx.Info("database schema up to date (version %d)", after)
 	default:
 		applied := 0
-		if migs, cerr := goose.CollectMigrations(".", before, after); cerr == nil {
+		if migs, cerr := goose.CollectMigrations(root, before, after); cerr == nil {
 			applied = len(migs)
 		}
 		if applied > 0 {
