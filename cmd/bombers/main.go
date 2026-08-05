@@ -513,7 +513,16 @@ func buildAndServe() (*app, error) {
 		// (the referee). Rooms are in-memory and ephemeral - nothing persists.
 		r.Post("/rooms", roomsHandler.Create)
 		// The activity (game) store: browse, install, and fetch a game's assets.
-		// Publishing is console-only, exactly like the node store.
+		// Admin-only game curation — the console's publish-game/unpublish-game
+		// reached over HTTP, so an operator can publish from the client instead
+		// of needing a shell on the box. Two steps like the pack store, because a
+		// game carries binary assets: the bundle first, then one PUT per file.
+		r.Group(func(r chi.Router) {
+			r.Use(admin.RequireAdmin(pool))
+			r.Post("/activities", activitiesHandler.Publish)
+			r.Put("/activities/{id}/assets/*", activitiesHandler.PublishAsset)
+			r.Delete("/activities/{id}", activitiesHandler.Unpublish)
+		})
 		// The pack store: downloadable themes + sound sets. Same shape as the
 		// activity store; any authed user browses and installs.
 		// Admin-only pack curation — the console's publish-pack/unpublish-pack

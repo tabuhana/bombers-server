@@ -47,6 +47,34 @@ func AssetKey(activityID, path string) string {
 	return fmt.Sprintf("activities/%s/%s", activityID, path)
 }
 
+// ValidActivityID guards the other half of an object key. It matches the charset
+// the desktop client enforces before writing a game to disk, so an id that
+// publishes is always an id that can be installed.
+func ValidActivityID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, c := range id {
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+const existsSQL = `SELECT EXISTS (SELECT 1 FROM activities WHERE id = $1)`
+
+// Exists reports whether a game is published. Asset uploads check it so a typo'd
+// id leaves no orphaned bytes in the bucket.
+func Exists(ctx context.Context, pool *pgxpool.Pool, id string) (bool, error) {
+	var ok bool
+	if err := pool.QueryRow(ctx, existsSQL, id).Scan(&ok); err != nil {
+		return false, fmt.Errorf("check activity: %w", err)
+	}
+	return ok, nil
+}
+
 // ValidAssetPath guards the one genuinely dangerous input here: a path that
 // escapes its activity's folder. Published bundles come from the operator, but a
 // traversal bug would be the worst kind, so the rule is narrow and positive —
