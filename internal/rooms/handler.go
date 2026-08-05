@@ -224,7 +224,7 @@ func (h *Handler) runMember(ctx context.Context, conn *websocket.Conn, room *Roo
 	defer conn.CloseNow()
 
 	out := make(chan []byte, sendQueue)
-	sender := &wsSender{out: out, cancel: cancel}
+	sender := &wsSender{out: out, closing: make(chan struct{})}
 
 	if _, err := room.Join(claims.UserID, claims.Username, sender); err != nil {
 		code := "room_full"
@@ -272,6 +272,31 @@ func (h *Handler) runMember(ctx context.Context, conn *websocket.Conn, room *Roo
 			select {
 			case <-ctx.Done():
 				return
+
+			// The room is ending this connection — a kick, or the room itself
+			// closing. It queued the frame EXPLAINING why immediately before
+			// asking us to stop, so stopping here would throw away the one
+			// message that makes the disconnect make sense. Drain first, then go.
+			case <-sender.closing:
+				for {
+					select {
+					case frame := <-out:
+						writeCtx, cancelWrite := context.WithTimeout(ctx, 5*time.Second)
+						err := conn.Write(writeCtx, websocket.MessageText, frame)
+						cancelWrite()
+						if err != nil {
+							cancel()
+							return
+						}
+					default:
+						// Everything queued is on the wire. NOW end it — the
+						// reader unblocks on the cancelled context and its
+						// deferred CloseNow shuts the socket.
+						cancel()
+						return
+					}
+				}
+
 			case frame, ok := <-out:
 				if !ok {
 					return
@@ -322,9 +347,7 @@ func (h *Handler) runMember(ctx context.Context, conn *websocket.Conn, room *Roo
 		// `host:` is a request OF the room rather than a message THROUGH it.
 		// Answered here and never relayed.
 		if strings.HasPrefix(e.Type, CtlPrefix) {
-			if h.control(room, claims.UserID, e, sender) {
-				return // the room ended under us
-			}
+			h.control(room, claims.UserID, e, sender)
 			continue
 		}
 		frame, err := stampFrom(e, claims.UserID)
@@ -345,18 +368,24 @@ type controlRequest struct {
 	ActivityID string `json:"activity_id"`
 }
 
-// control answers one host request. Returns true when the room ended, so the
-// caller stops reading from a socket that no longer belongs to anything.
+// control answers one host request.
 //
 // Every refusal names its reason: unlike joining - where an opaque 404 stops a
 // room id being probed - the sender is already inside the room, so there is
 // nothing left to hide and a silent no-op would just look broken.
-func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender) bool {
+//
+// Ending the room needs no special handling here. Room.Close() ends every
+// member's connection including this one, so the host unwinds down the same
+// graceful path as everybody else: last frames flushed, then the context
+// cancelled, then the read below fails and runMember returns. Short-circuiting
+// out of the read loop instead would race the host's own `room:closed` off the
+// wire.
+func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender) {
 	var req controlRequest
 	if len(e.Data) > 0 {
 		if err := json.Unmarshal(e.Data, &req); err != nil {
 			sender.Send(mustControl(TypeError, map[string]any{"code": errInvalidBody}))
-			return false
+			return
 		}
 	}
 
@@ -373,12 +402,12 @@ func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender)
 		// same as the rest.
 		if room.Host() != userID {
 			sender.Send(mustControl(TypeError, map[string]any{"code": "not_host"}))
-			return false
+			return
 		}
 		room.Close()
 		h.hub.Remove(room.ID)
 		logx.Info("rooms: %s ended by its host", room.ID)
-		return true
+		return
 	default:
 		err = errors.New("unknown control")
 	}
@@ -386,7 +415,6 @@ func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender)
 	if err != nil {
 		sender.Send(mustControl(TypeError, map[string]any{"code": controlErrorCode(err)}))
 	}
-	return false
 }
 
 func controlErrorCode(err error) string {
@@ -404,9 +432,13 @@ func controlErrorCode(err error) string {
 // the peer isn't keeping up: the frame is DROPPED rather than blocking the
 // broadcast - one slow member must never freeze the room.
 type wsSender struct {
-	out    chan []byte
-	cancel context.CancelFunc
-	once   sync.Once
+	out chan []byte
+	// closing is shut to ask the writer to finish up. NOT the context: the room
+	// sends `room:kicked` or `room:closed` and then immediately ends the
+	// connection, so cancelling outright would discard the very frame that
+	// explains the disconnect. See the writer's drain case.
+	closing chan struct{}
+	once    sync.Once
 }
 
 func (s *wsSender) Send(msg []byte) {
@@ -417,15 +449,13 @@ func (s *wsSender) Send(msg []byte) {
 }
 
 // Close ends this member's connection - what the room calls when they've been
-// kicked or it has itself ended. Cancelling the member's context unwinds both
-// pumps and runs the deferred Leave, so there is one teardown path whether the
-// socket died on its own or was ended for it.
+// kicked or it has itself ended.
+//
+// It's a request, not an execution: the writer flushes what's queued and then
+// cancels the context, which unwinds the reader and runs the deferred Leave. One
+// teardown path either way, but the last words get out first.
 func (s *wsSender) Close() {
-	s.once.Do(func() {
-		if s.cancel != nil {
-			s.cancel()
-		}
-	})
+	s.once.Do(func() { close(s.closing) })
 }
 
 func mustControl(msgType string, data map[string]any) []byte {
