@@ -33,6 +33,13 @@ reinstalling. `install` builds and records where your checkout lives (in
 `<dataDir>/install.json`, so `update` works from any directory); it configures
 nothing and touches no database.
 
+The binary lands in `/usr/local/bin` when that's writable, otherwise
+`~/.local/bin` — and on Windows, `%LOCALAPPDATA%\Programs\Bombers`, which
+`install` adds to your user PATH for you (no admin needed; the machine-wide PATH
+is never touched). **Open a new terminal after installing** — the one you ran it
+in still has the PATH it started with. On Linux and macOS it prints the `export`
+line to add instead, since there's no shell config it can safely edit for you.
+
 ### Requirements
 
 - **Go 1.25+** — the server is built from source on your machine. There are no
