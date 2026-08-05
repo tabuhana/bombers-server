@@ -33,13 +33,14 @@ func runUpdate(_ []string) {
 	// Rebuild from the checkout recorded at install time, so `bombers update`
 	// works from any directory. Then hand the migration to the NEW binary: the
 	// migrations are embedded in it, so the copy currently running has no idea
-	// the new one exists.
+	// the new one exists. That exec is the ONLY reason internalMigrateCmd
+	// exists — see main.go. There is no user-facing migrate command.
 	if rec, rerr := loadInstallRecord(); rerr == nil {
 		if err := buildInto(rec.Source, rec.Binary); err != nil {
 			logx.Fatal("update: %v", err)
 		}
 		logx.Info("update: rebuilt %s", rec.Binary)
-		cmd := exec.Command(rec.Binary, "migrate")
+		cmd := exec.Command(rec.Binary, internalMigrateCmd)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := cmd.Run(); err != nil {
 			os.Exit(1)

@@ -111,7 +111,7 @@ func main() {
 		runSetup(rest)
 	case "doctor":
 		runDoctor(rest)
-	case "migrate":
+	case internalMigrateCmd:
 		runMigrate(rest)
 	case "update":
 		runUpdate(rest)
@@ -157,7 +157,6 @@ Commands:
   logs       Print the tail of the background server's log (logs [lines])
   setup      Configure the database + media and migrate — re-run any time to change it
   doctor     Check the local setup for problems
-  migrate    Apply pending database migrations, then exit — does not serve
   update     After a git pull: rebuild and migrate — does not serve
   console    Open the admin console against a running server (users, status, node store)
   service    Manage the OS background service (see actions below)
@@ -316,7 +315,7 @@ func buildAndServe() (*app, error) {
 		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 		pool, err = store.NewPool(ctx, connStr)
 	} else {
-		// A container host has no shell to run `bombers migrate` in, so
+		// A container host has no shell to run an update in, so
 		// AUTO_MIGRATE lets a deploy carry its own schema. Deliberately opt-in:
 		// on a managed database, schema changes shouldn't happen as a side
 		// effect of a restart.
@@ -939,6 +938,19 @@ const (
 // between server runs, so it starts the database, migrates, and stops it again.
 // (Refusing in that case, as this used to, made `update` impossible on a
 // self-hosted install.)
+// internalMigrateCmd is NOT a command. Migrating is plumbing — you run `update`,
+// or `setup` on a fresh install, and the schema comes up as part of that. There
+// is no `bombers migrate` any more, for the same reason there is no
+// `bombers connect-to-database`.
+//
+// It survives as an argv token only because `update` has no choice: the
+// migrations are EMBEDDED in the binary, and `update` is the OLD binary running.
+// It rebuilds, then has to ask the NEW one to migrate — and the only way to
+// reach into another process is to exec it with an argument. The leading
+// underscores are the signal that this is internal; it's absent from `help`, so
+// anything a user types lands on the unknown-command path.
+const internalMigrateCmd = "__migrate"
+
 func runMigrate(_ []string) {
 	loadEnvAndConfig()
 	logx.Init()
