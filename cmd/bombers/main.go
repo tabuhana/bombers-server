@@ -1071,17 +1071,21 @@ func runDoctor(_ []string) {
 		mark(markSkip, "Architecture", "external database — no architecture constraint")
 	}
 
-	// 4. Port is bindable right now (a rough "is the server already running?"
-	// probe): listen, then immediately close on success.
+	// 4. Can the server have the port? Listen and close on success — but a port
+	// that's taken is only a fault when it isn't OURS, and the likeliest reason
+	// it's taken is that the server is running on it.
 	if cfg == nil {
 		mark(markSkip, "Port", "config didn't load")
 	} else {
 		addr := cfg.Host + ":" + cfg.Port
-		if ln, err := net.Listen("tcp", addr); err != nil {
-			mark(markFAIL, "Port", fmt.Sprintf("cannot bind %s: %v (already in use?)", addr, err))
-		} else {
+		switch ln, err := net.Listen("tcp", addr); {
+		case err == nil:
 			_ = ln.Close()
 			mark(markOK, "Port", fmt.Sprintf("%s is free", addr))
+		case serverHolds(cfg.Host, cfg.Port):
+			mark(markOK, "Port", fmt.Sprintf("%s — a Bombers server is running on it", addr))
+		default:
+			mark(markFAIL, "Port", fmt.Sprintf("cannot bind %s: %s", addr, oneLine(err.Error())))
 		}
 	}
 
@@ -1097,13 +1101,13 @@ func runDoctor(_ []string) {
 		pool, err := store.NewPool(ctx, cfg.DatabaseURL)
 		if err != nil {
 			cancel()
-			mark(markFAIL, "Database", fmt.Sprintf("cannot connect: %v", err))
+			mark(markFAIL, "Database", describeDBError(err, cfg.DatabaseURL))
 		} else {
 			perr := pool.Ping(ctx)
 			cancel()
 			pool.Close()
 			if perr != nil {
-				mark(markFAIL, "Database", fmt.Sprintf("ping failed: %v", perr))
+				mark(markFAIL, "Database", describeDBError(perr, cfg.DatabaseURL))
 			} else {
 				mark(markOK, "Database", "reachable")
 			}
@@ -1154,6 +1158,58 @@ func runDoctor(_ []string) {
 	if failCount > 0 {
 		os.Exit(1)
 	}
+}
+
+// serverHolds reports whether a Bombers server is what's occupying host:port.
+//
+// The pidfile would be the obvious thing to consult and it's the wrong one: it's
+// written by daemonize, so it exists only when `bombers start` backgrounded
+// itself at a terminal. A systemd or Windows-service launch stays in the
+// foreground and writes none, and that install is exactly the one somebody runs
+// doctor against. /health answers in every mode.
+//
+// A 503 counts. A server whose database is down is still our server holding that
+// port, and doctor reports the database separately — the port check's only job
+// is to say whether the address is available to us.
+func serverHolds(host, port string) bool {
+	// A wildcard bind isn't dialable; ask the loopback address instead.
+	probe := host
+	if probe == "" || probe == "0.0.0.0" || probe == "::" {
+		probe = "127.0.0.1"
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + net.JoinHostPort(probe, port) + "/health")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Something answered, which isn't the same as OUR something. /health returns
+	// the status document, so look for it rather than calling any web server on
+	// that port a Bombers.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	return strings.Contains(string(body), `"status"`)
+}
+
+// describeDBError turns a connection failure into one line worth reading. pgx
+// reports every address it tried, each on its own line, which is four lines of
+// noise wrapped around the one fact that matters. `bombers update` already says
+// this well; doctor should say it the same way.
+func describeDBError(err error, dbURL string) string {
+	if isUnreachableDB(err) {
+		return fmt.Sprintf("cannot reach %s — is Postgres running?", redactDBURL(dbURL))
+	}
+	return oneLine(err.Error())
+}
+
+// oneLine flattens a message so it can't break the checklist's alignment,
+// trimming it if it's still unreasonable.
+func oneLine(s string) string {
+	msg := strings.Join(strings.Fields(s), " ")
+	if len(msg) > 160 {
+		return msg[:157] + "..."
+	}
+	return msg
 }
 
 // effectiveDBBackend resolves which database backend doctor should test: an
