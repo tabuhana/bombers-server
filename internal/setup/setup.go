@@ -362,19 +362,42 @@ func cleanDomain(in string) string {
 	return strings.Trim(out, "/")
 }
 
-// normalizePort keeps a usable port, falling back to what was already there
-// rather than erroring on something unparseable.
-func normalizePort(in, current string) string {
-	port := strings.TrimSpace(in)
-	if _, err := strconv.Atoi(port); err != nil {
-		return firstNonEmpty(current, defaultPort)
+// portProblem says why a port can't be used, or "" when it can.
+//
+// The floor is 1024, not 1. Everything below it is privileged on Linux and
+// macOS, so a server configured onto 443 would save happily and then fail to
+// start with a permission error that names nothing useful. Nothing else in this
+// install path needs sudo, and a public port is a reverse proxy's job anyway —
+// which is exactly what the domain answer sets up.
+func portProblem(in string) string {
+	n, err := strconv.Atoi(strings.TrimSpace(in))
+	if err != nil {
+		return "a port has to be a number"
 	}
-	return port
+	if n < 1024 || n > 65535 {
+		return "use a port between 1024 and 65535 (lower ones need root)"
+	}
+	return ""
 }
 
-// askPort is the typed-prompt version of the port question.
+// normalizePort keeps a usable port, falling back to what was already there
+// rather than erroring on something unusable.
+func normalizePort(in, current string) string {
+	if portProblem(in) != "" {
+		return firstNonEmpty(current, defaultPort)
+	}
+	return strings.TrimSpace(in)
+}
+
+// askPort is the typed-prompt version of the port question. It can't re-ask the
+// way the menu path does — there may be nobody there — so it says what it did
+// instead of silently discarding the answer.
 func askPort(r *bufio.Reader, fc *FileConfig) {
-	fc.Port = normalizePort(ask(r, "Port", fc.Port, defaultPort), fc.Port)
+	in := ask(r, "Port", fc.Port, defaultPort)
+	if p := portProblem(in); p != "" {
+		fmt.Printf("  ! %s — keeping %s\n", p, firstNonEmpty(fc.Port, defaultPort))
+	}
+	fc.Port = normalizePort(in, fc.Port)
 }
 
 // askDatabase is the typed-prompt version of the DB pick: run our own Postgres

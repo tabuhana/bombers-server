@@ -98,10 +98,21 @@ func tuiReachability(fc *FileConfig, _ string) error {
 	return nil
 }
 
-// tuiPort asks for the HTTP port.
+// tuiPort asks for the HTTP port, refusing one that couldn't be bound rather
+// than accepting it and failing at startup instead.
 func tuiPort(fc *FileConfig, _ string) error {
 	port := firstNonEmpty(fc.Port, defaultPort)
-	if err := run(huh.NewInput().Title("Port").Value(&port)); err != nil {
+	if err := run(
+		huh.NewInput().
+			Title("Port").
+			Value(&port).
+			Validate(func(s string) error {
+				if p := portProblem(s); p != "" {
+					return errors.New(p)
+				}
+				return nil
+			}),
+	); err != nil {
 		return err
 	}
 	fc.Port = normalizePort(port, fc.Port)
