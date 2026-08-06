@@ -105,8 +105,14 @@ choice plus its configuration where the choice needs one: a
 select → configure → select → configure flow (hermes/openclaw style), **not** a
 bundled preset. In order:
 
-1. **Reachable from other devices?** — `127.0.0.1` (this machine only, default) or
-   `0.0.0.0` (LAN, plain HTTP on a trusted network).
+1. **Where are you running this?** — a computer on my network (`0.0.0.0`, plain
+   HTTP on a trusted network) or a server with a domain name (then enter the
+   domain; binds `127.0.0.1`, because a reverse proxy owns the public port and
+   forwards here — setup prints the Caddyfile at the end).
+
+   > There was a third answer, `127.0.0.1` with no domain — "this machine only".
+   > It went because it answered a question nobody asks: a personal notebook
+   > server you can't reach from your own laptop isn't the setup anyone wants.
 2. **Port** — default `1337`.
 3. **Database** — run Postgres for me (embedded, the default — nothing to install)
    or use my own (then enter a `DATABASE_URL`).

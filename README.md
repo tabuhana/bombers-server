@@ -56,10 +56,14 @@ are the default answers.
 
 A short sequence, each step a choice and then its details:
 
-1. **Reachability** — this computer, your network, or the internet at a domain
+1. **Where you're running it** — a computer on your network, or a server with a domain name
 2. **Port**
 3. **Database** — a built-in Postgres it manages for you, or a connection URL you provide
 4. **Media** — files on disk, or an S3-compatible store (MinIO, Cloudflare R2)
+
+At a terminal these are menus you arrow through. Piped or scripted input falls
+back to typed prompts answering the same four questions, so an install can be
+automated.
 
 Answers are saved to `config.json` in the data directory and it migrates on the
 way out. Re-run `bombers setup` any time to change them.

@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,35 @@ import (
 )
 
 const configFile = "config.json"
+
+// Wizard defaults, in one place because two prompt paths offer them and a pair
+// that disagreed would be a bug nobody notices until a support thread.
+const (
+	defaultPort        = "1337"
+	defaultDatabaseURL = "postgresql://admin:adminpassword@localhost:5432/bombers"
+	defaultS3Endpoint  = "localhost:9000"
+	defaultS3AccessKey = "bombers"
+	defaultS3SecretKey = "hanascript"
+	defaultS3Bucket    = "bombers-media"
+	exampleDomain      = "bombers.example.com"
+)
+
+// The two places a Bombers server lives, as the wizard sees it.
+//
+// There used to be a third, "this computer only", binding 127.0.0.1. It went
+// because it answered a question nobody asks: if you are running a personal
+// notebook server, you want your own laptop to reach it, so the network answer
+// was always the right one. The narrow bind didn't disappear — the domain
+// answer uses it, since a reverse proxy is what faces the internet there.
+const (
+	reachNetwork = "network"
+	reachDomain  = "domain"
+)
+
+// ErrCancelled is returned when the operator abandons the wizard (Ctrl+C).
+// Callers should exit without saving: half-answered configuration is worse than
+// none, because it looks finished.
+var ErrCancelled = errors.New("setup cancelled")
 
 // DataDir resolves (but does NOT create) the directory the local server owns.
 // Today that's just the config file; later phases add the embedded Postgres
@@ -209,51 +239,99 @@ func present(key, fileValue string) bool {
 	return os.Getenv(key) != "" || fileValue != ""
 }
 
-// Wizard runs the first-run prompts on stdin, writing answers into fc. It's a
+// Wizard runs the first-run questions and writes the answers into fc. It's a
 // straight walk-through — one decision at a time, each a choice plus its config
-// where the choice needs one: reachability (this computer / the LAN / a public
-// domain), port, database (embedded / your own URL), then media (local files /
-// S3-MinIO). Each prompt shows the
-// current-or-default value in [brackets]; an empty line keeps it. dataDir is
-// where the filesystem media root is placed (<dataDir>/media). Callers gate this
-// on an interactive terminal, then run EnsureSecret + Save.
-func Wizard(fc *FileConfig, dataDir string) {
+// where the choice needs one: where the server lives, port, database (its own /
+// yours), then media (local files / S3-MinIO). dataDir is where the filesystem
+// media root is placed (<dataDir>/media). Callers run EnsureSecret + Save after.
+//
+// There are two prompt styles for the same four questions. At a real terminal
+// you get selects you arrow through; anywhere else — a pipe, a script, a test —
+// you get typed prompts reading lines from stdin. That's not only a fallback for
+// politeness: a wizard that can ONLY be driven by a human is a wizard nobody can
+// test or automate. Both paths route through the same apply* functions below, so
+// the two can't drift apart on what an answer MEANS.
+func Wizard(fc *FileConfig, dataDir string) error {
+	if interactive(os.Stdin) {
+		return wizardTUI(fc, dataDir)
+	}
+	wizardText(fc, dataDir)
+	return nil
+}
+
+// interactive reports whether f is a terminal (a character device) rather than a
+// pipe or a file.
+func interactive(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// wizardText is the typed-prompt path. Each prompt shows the current-or-default
+// value in [brackets]; an empty line keeps it.
+func wizardText(fc *FileConfig, dataDir string) {
 	r := bufio.NewReader(os.Stdin)
 
 	fmt.Println()
 	fmt.Println("Bombers local setup — press Enter to accept each [default].")
 
-	// Walk each decision in order — reachability, port, database, then media —
-	// choosing (and configuring) each piece as you go. No bundled preset.
-	fc.Host = askReachability(r, fc)
-	fc.Port = askPort(r, fc)
+	askReachability(r, fc)
+	askPort(r, fc)
 	askDatabase(r, fc)
 	askMedia(r, fc, dataDir)
 
 	fmt.Println()
 }
 
-// askReachability asks who can reach the server and returns the bind host:
-// 127.0.0.1 (this machine only, the default), 0.0.0.0 (the LAN, over plain
-// HTTP — fine on a trusted network, per LOCAL_MODE.md §8/§10), or a public
-// domain, which ALSO binds 127.0.0.1 because a reverse proxy fronts it.
+// applyReachability records where the server lives: the bind host, and the
+// public domain when there is one.
 //
-// That third answer surprises people, so: on a rented VPS the machine is on the
-// public internet, and plain HTTP there means every password crosses it
-// readable. Caddy terminates TLS on 443 and forwards to us on localhost — so
-// binding wider would only expose the unencrypted port beside the encrypted
-// one. See askDomain for why the server doesn't do TLS itself.
-func askReachability(r *bufio.Reader, fc *FileConfig) string {
+// The domain answer binds 127.0.0.1, which reads backwards until you see why. On
+// a rented VPS the machine is already on the public internet; Caddy terminates
+// TLS on 443 and forwards here on localhost. Binding wider wouldn't make the
+// server more reachable — it would publish the UNENCRYPTED port beside the
+// encrypted one. See the tui/text domain prompts for why we don't do TLS here.
+func applyReachability(fc *FileConfig, choice, domain string) {
+	if choice == reachDomain {
+		fc.Host = "127.0.0.1"
+		fc.Domain = cleanDomain(domain)
+		return
+	}
+	// Clear the domain on the way past, or a config that used to be public keeps
+	// printing Caddy instructions for a server that isn't.
+	fc.Host = "0.0.0.0"
+	fc.Domain = ""
+}
+
+// reachOf reports which answer a saved config represents, so a re-run opens on
+// the choice already in force.
+func reachOf(fc *FileConfig) string {
+	if fc.Domain != "" {
+		return reachDomain
+	}
+	return reachNetwork
+}
+
+// domainWarning describes what's wrong with a domain, or "" if it looks usable.
+// A warning, never a refusal — the config is portable, and someone may well be
+// configuring a machine that isn't the one the domain points at yet.
+func domainWarning(domain string) string {
+	if !strings.Contains(domain, ".") {
+		return "that doesn't look like a public domain, and a certificate authority\n    can only issue for one that resolves on the internet"
+	}
+	return ""
+}
+
+// askReachability is the typed-prompt version of the where-does-it-live pick.
+func askReachability(r *bufio.Reader, fc *FileConfig) {
 	fmt.Println()
-	fmt.Println("Who should be able to reach this server?")
-	fmt.Println("  1) This computer only")
-	fmt.Println("  2) Other devices on my network (LAN) — plain HTTP, trusted networks only")
-	fmt.Println("  3) Anyone, at a domain name (a rented VPS — HTTPS, set up at the end)")
+	fmt.Println("Where are you running this?")
+	fmt.Println("  1) A computer on my network")
+	fmt.Println("  2) A server with a domain name")
 	def := "1"
-	switch {
-	case fc.Domain != "":
-		def = "3"
-	case fc.Host == "0.0.0.0":
+	if reachOf(fc) == reachDomain {
 		def = "2"
 	}
 	fmt.Printf("Choice [%s]: ", def)
@@ -261,38 +339,17 @@ func askReachability(r *bufio.Reader, fc *FileConfig) string {
 	if choice == "" {
 		choice = def
 	}
-	switch choice {
-	case "3":
-		askDomain(r, fc)
-		return "127.0.0.1"
-	case "2":
-		// Clear the domain on the way past, or a config that used to be public
-		// keeps printing Caddy instructions for a server that isn't.
-		fc.Domain = ""
-		return "0.0.0.0"
-	default:
-		fc.Domain = ""
-		return "127.0.0.1"
+	if choice != "2" {
+		applyReachability(fc, reachNetwork, "")
+		return
 	}
-}
-
-// askDomain collects the public name an internet-facing install answers on.
-//
-// Bombers deliberately does NOT terminate TLS itself. It could — Go ships the
-// pieces — but certificates are issued for ports 80 and 443, and binding those
-// on Linux needs root or a capability grant. The whole install path is built so
-// that nothing in the normal flow needs sudo, and a reverse proxy is already a
-// system service holding exactly those privileges. So the trade is: one more
-// program on a VPS, and the server stays an ordinary unprivileged process.
-func askDomain(r *bufio.Reader, fc *FileConfig) {
 	fmt.Println()
 	fmt.Println("  The domain has to point at this machine before HTTPS can work —")
 	fmt.Println("  an A record aimed at its IP. That DNS entry IS the proof of")
 	fmt.Println("  ownership the certificate authority checks.")
-	fc.Domain = cleanDomain(ask(r, "Domain", fc.Domain, "bombers.example.com"))
-	if !strings.Contains(fc.Domain, ".") {
-		fmt.Println("  ! Note: that doesn't look like a public domain, and a certificate")
-		fmt.Println("    authority can only issue for one that resolves on the internet.")
+	applyReachability(fc, reachDomain, ask(r, "Domain", fc.Domain, exampleDomain))
+	if w := domainWarning(fc.Domain); w != "" {
+		fmt.Println("  ! Note: " + w)
 	}
 }
 
@@ -305,18 +362,23 @@ func cleanDomain(in string) string {
 	return strings.Trim(out, "/")
 }
 
-// askPort asks for the HTTP port, keeping the current-or-1337 default and
-// falling back to it on non-numeric input rather than erroring.
-func askPort(r *bufio.Reader, fc *FileConfig) string {
-	port := ask(r, "Port", fc.Port, "1337")
+// normalizePort keeps a usable port, falling back to what was already there
+// rather than erroring on something unparseable.
+func normalizePort(in, current string) string {
+	port := strings.TrimSpace(in)
 	if _, err := strconv.Atoi(port); err != nil {
-		return firstNonEmpty(fc.Port, "1337")
+		return firstNonEmpty(current, defaultPort)
 	}
 	return port
 }
 
-// askDatabase is the customize-path DB pick: run our own Postgres (embedded, the
-// default) or use an external one (enter a URL).
+// askPort is the typed-prompt version of the port question.
+func askPort(r *bufio.Reader, fc *FileConfig) {
+	fc.Port = normalizePort(ask(r, "Port", fc.Port, defaultPort), fc.Port)
+}
+
+// askDatabase is the typed-prompt version of the DB pick: run our own Postgres
+// (embedded, the default) or use an external one (enter a URL).
 func askDatabase(r *bufio.Reader, fc *FileConfig) {
 	fmt.Println()
 	fmt.Println("Where should Bombers store its data (Postgres)?")
@@ -327,37 +389,54 @@ func askDatabase(r *bufio.Reader, fc *FileConfig) {
 		def = "2"
 	}
 	if ask(r, "Choice", "", def) == "2" {
-		askDatabaseURL(r, fc)
-	} else {
-		askEmbeddedPG(fc)
+		applyExternalDB(fc, ask(r, "Postgres URL", fc.DatabaseURL, defaultDatabaseURL))
+		return
+	}
+	if w := applyEmbeddedPG(fc); w != "" {
+		fmt.Println("  ! Note: " + w)
 	}
 }
 
-// askEmbeddedPG selects the embedded Postgres backend: the server downloads +
+// applyEmbeddedPG selects the embedded Postgres backend: the server downloads +
 // supervises a private Postgres bound to localhost, so there is nothing to
-// install. On a 32-bit build it can't run (no 386 Postgres is published), so warn
-// now; `bombers start` rejects it with the same guidance (embeddedpg.Start). Not
-// a hard block — the config is portable, so they may rebuild 64-bit or run it
-// elsewhere.
-func askEmbeddedPG(fc *FileConfig) {
+// install. It returns a warning to show, or "" when there's nothing to say — on
+// a 32-bit build it can't run (no 386 Postgres is published), and saying so at
+// the pick beats finding out at `bombers start`, which rejects it with the same
+// guidance (embeddedpg.Start). Not a hard block: the config is portable, so they
+// may rebuild 64-bit or run it elsewhere.
+func applyEmbeddedPG(fc *FileConfig) string {
 	fc.DBBackend = "embedded"
 	if runtime.GOARCH == "386" {
-		fmt.Println("  ! Note: this is a 32-bit build, and embedded Postgres needs 64-bit —")
-		fmt.Println("    it won't start until you rebuild with `GOARCH=amd64 go build`")
-		fmt.Println("    (or re-run setup and choose your own Postgres).")
+		return "this is a 32-bit build, and embedded Postgres needs 64-bit — it won't\n    start until you rebuild with `GOARCH=amd64 go build` (or re-run setup\n    and choose your own Postgres)"
 	}
+	return ""
 }
 
-// askDatabaseURL selects the external Postgres backend and prompts for the
-// connection URL (default matches the repo's docker-compose).
-func askDatabaseURL(r *bufio.Reader, fc *FileConfig) {
+// applyExternalDB selects the external Postgres backend with a connection URL.
+func applyExternalDB(fc *FileConfig, url string) {
 	fc.DBBackend = "external"
-	fc.DatabaseURL = ask(r, "Postgres URL", fc.DatabaseURL,
-		"postgresql://admin:adminpassword@localhost:5432/bombers")
+	fc.DatabaseURL = strings.TrimSpace(url)
 }
 
-// askMedia is the customize-path media pick: plain files on this computer (the
-// default — no daemon, no download) or an external S3/MinIO server.
+// applyFilesystemMedia selects the filesystem media backend: plain files under
+// <dataDir>/media. No credentials, no daemon, nothing to run.
+func applyFilesystemMedia(fc *FileConfig, dataDir string) {
+	fc.MediaBackend = "fs"
+	fc.MediaDir = filepath.Join(dataDir, "media")
+}
+
+// applyS3Media selects the S3/MinIO media backend with its endpoint and keys.
+func applyS3Media(fc *FileConfig, endpoint, accessKey, secretKey, bucket string, useSSL bool) {
+	fc.MediaBackend = "s3"
+	fc.S3Endpoint = strings.TrimSpace(endpoint)
+	fc.S3AccessKey = strings.TrimSpace(accessKey)
+	fc.S3SecretKey = strings.TrimSpace(secretKey)
+	fc.S3Bucket = strings.TrimSpace(bucket)
+	fc.S3UseSSL = useSSL
+}
+
+// askMedia is the typed-prompt version of the media pick: plain files on this
+// computer (the default — no daemon, no download) or an external S3/MinIO server.
 func askMedia(r *bufio.Reader, fc *FileConfig, dataDir string) {
 	fmt.Println()
 	fmt.Println("Where should uploaded media (avatars, banners) be stored?")
@@ -367,29 +446,17 @@ func askMedia(r *bufio.Reader, fc *FileConfig, dataDir string) {
 	if fc.MediaBackend == "s3" {
 		def = "2"
 	}
-	if ask(r, "Choice", "", def) == "2" {
-		askS3Details(r, fc)
-	} else {
-		askFilesystem(fc, dataDir)
+	if ask(r, "Choice", "", def) != "2" {
+		applyFilesystemMedia(fc, dataDir)
+		return
 	}
-}
-
-// askFilesystem selects the filesystem media backend: plain files under
-// <dataDir>/media. No S3 prompts, no daemon, nothing to run.
-func askFilesystem(fc *FileConfig, dataDir string) {
-	fc.MediaBackend = "fs"
-	fc.MediaDir = filepath.Join(dataDir, "media")
-}
-
-// askS3Details selects the S3/MinIO media backend and prompts for its endpoint +
-// credentials (defaults match the repo's docker-compose MinIO).
-func askS3Details(r *bufio.Reader, fc *FileConfig) {
-	fc.MediaBackend = "s3"
-	fc.S3Endpoint = ask(r, "S3 endpoint", fc.S3Endpoint, "localhost:9000")
-	fc.S3AccessKey = ask(r, "S3 access key", fc.S3AccessKey, "bombers")
-	fc.S3SecretKey = ask(r, "S3 secret key", fc.S3SecretKey, "hanascript")
-	fc.S3Bucket = ask(r, "S3 bucket", fc.S3Bucket, "bombers-media")
-	fc.S3UseSSL = askBool(r, "Use TLS for S3 (https)", fc.S3UseSSL)
+	applyS3Media(fc,
+		ask(r, "S3 endpoint", fc.S3Endpoint, defaultS3Endpoint),
+		ask(r, "S3 access key", fc.S3AccessKey, defaultS3AccessKey),
+		ask(r, "S3 secret key", fc.S3SecretKey, defaultS3SecretKey),
+		ask(r, "S3 bucket", fc.S3Bucket, defaultS3Bucket),
+		askBool(r, "Use TLS for S3 (https)", fc.S3UseSSL),
+	)
 }
 
 // ask prints "label [default]: " and returns the trimmed input, or the default

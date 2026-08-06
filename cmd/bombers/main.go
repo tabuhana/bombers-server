@@ -858,7 +858,15 @@ func runSetup(_ []string) {
 		logx.Fatal("resolving data dir: %v", err)
 	}
 	fc, _ := setup.Load(dir)
-	setup.Wizard(fc, dir)
+	if err := setup.Wizard(fc, dir); err != nil {
+		// Ctrl+C out of the wizard leaves the old config alone. A half-answered
+		// one would be worse than none, because it looks finished.
+		if errors.Is(err, setup.ErrCancelled) {
+			fmt.Println("\nSetup cancelled — nothing was changed.")
+			os.Exit(1)
+		}
+		logx.Fatal("setup: %v", err)
+	}
 	setup.EnsureSecret(fc)
 	if err := fc.Save(dir); err != nil {
 		logx.Fatal("saving local config: %v", err)
