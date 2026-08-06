@@ -904,8 +904,18 @@ func printSetupSummary(fc *setup.FileConfig, dir string) {
 	fmt.Printf("  %-10s%s\n", "Media:", mediaLine)
 	fmt.Println()
 	fmt.Println("Reachable at:")
-	for _, u := range console.ReachableURLs(fc.Host, fc.Port) {
-		fmt.Printf("  %s\n", u)
+	if fc.Domain != "" {
+		// The domain is what a client types; the local address is what Caddy
+		// forwards to, and saying so up front stops it reading as a mistake.
+		fmt.Printf("  https://%s\n", fc.Domain)
+		fmt.Printf("  http://%s:%s  (this machine only — where Caddy forwards)\n", fc.Host, fc.Port)
+	} else {
+		for _, u := range console.ReachableURLs(fc.Host, fc.Port) {
+			fmt.Printf("  %s\n", u)
+		}
+	}
+	if fc.Domain != "" {
+		printCaddyGuidance(fc)
 	}
 	fmt.Println()
 	fmt.Println("Next:")
@@ -913,6 +923,29 @@ func printSetupSummary(fc *setup.FileConfig, dir string) {
 	fmt.Printf("  %-16s%s\n", "bombers doctor", "check for issues")
 	fmt.Printf("  %-16s%s\n", "bombers setup", "re-run this wizard")
 	fmt.Println()
+}
+
+// printCaddyGuidance prints the part of an internet-facing install that setup
+// can't do for you: HTTPS. Bombers stays an unprivileged process bound to
+// localhost and a reverse proxy owns the public ports — see setup.askDomain for
+// why that split, rather than terminating TLS in here.
+func printCaddyGuidance(fc *setup.FileConfig) {
+	fmt.Println()
+	fmt.Println("One step left — HTTPS:")
+	fmt.Println()
+	fmt.Printf("  1. Point an A record for %s at this machine's IP address.\n", fc.Domain)
+	fmt.Println("  2. Install Caddy:  https://caddyserver.com/docs/install")
+	fmt.Println("  3. Put this in /etc/caddy/Caddyfile:")
+	fmt.Println()
+	fmt.Printf("       %s {\n", fc.Domain)
+	fmt.Printf("           reverse_proxy %s:%s\n", fc.Host, fc.Port)
+	fmt.Println("       }")
+	fmt.Println()
+	fmt.Println("  4. sudo systemctl reload caddy")
+	fmt.Println()
+	fmt.Println("  Caddy gets the certificate and renews it on its own — there is no")
+	fmt.Println("  paperwork and no account. If the domain is on Cloudflare, set that")
+	fmt.Println("  record to \"DNS only\" (grey cloud), or the check never reaches here.")
 }
 
 // Doctor status markers — fixed-width and ASCII-safe so the checklist stays

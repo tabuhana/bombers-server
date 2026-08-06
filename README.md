@@ -56,7 +56,7 @@ are the default answers.
 
 A short sequence, each step a choice and then its details:
 
-1. **Reachability** — just this machine, or your network / the internet (sets the bind host)
+1. **Reachability** — this computer, your network, or the internet at a domain
 2. **Port**
 3. **Database** — a built-in Postgres it manages for you, or a connection URL you provide
 4. **Media** — files on disk, or an S3-compatible store (MinIO, Cloudflare R2)
@@ -67,6 +67,41 @@ way out. Re-run `bombers setup` any time to change them.
 **Environment variables always win.** They're read first, and the saved config
 only fills what they don't set — so a fully configured environment (a container,
 a systemd unit with `Environment=` lines) never sees the wizard at all.
+
+### Putting it on the internet (a rented VPS)
+
+Pick **"Anyone, at a domain name"** and setup asks for the domain, keeps the
+server bound to `localhost`, and finishes by printing the three steps it can't do
+for you. In short:
+
+1. Point an **A record** for your domain at the machine's IP address.
+2. [Install Caddy](https://caddyserver.com/docs/install).
+3. Put two lines in `/etc/caddy/Caddyfile` and reload it:
+
+```
+bombers.example.com {
+	reverse_proxy 127.0.0.1:1337
+}
+```
+
+Caddy obtains the HTTPS certificate and renews it on its own — no account, no
+paperwork. The DNS record is the proof of ownership the certificate authority
+checks, which is why it has to exist first. If the domain is on Cloudflare, set
+that record to **DNS only** (grey cloud), or the check never reaches your
+machine.
+
+**Why a proxy rather than HTTPS in the server.** Certificates are issued against
+ports 80 and 443, and binding those on Linux needs root. Nothing in this install
+path needs sudo, and a reverse proxy is already a system service holding exactly
+those privileges — so Bombers stays an ordinary unprivileged process listening on
+localhost, and only Caddy faces the internet.
+
+You'll also want it running after a reboot — see **Start on boot** below.
+
+> **Don't skip this and just open the port.** Binding `0.0.0.0` on a public VPS
+> works, and every password and token then crosses the internet readable. The
+> client refuses a bare public IP for that reason: anything that isn't loopback
+> or a private LAN address gets `https://` forced onto it.
 
 ### Where things live
 

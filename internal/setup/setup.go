@@ -56,6 +56,12 @@ type FileConfig struct {
 	Port              string `json:"port"`
 	TokenSecret       string `json:"token_secret"`
 	CorsAllowedOrigin string `json:"cors_allowed_origin"`
+	// Domain is the public name an internet-facing install answers on. It is the
+	// one field here that is NOT an environment variable, because nothing in the
+	// server reads it: we bind localhost in that mode and Caddy owns the public
+	// ports, so the domain only shapes what setup tells you to put in a
+	// Caddyfile. Empty for the this-computer and LAN setups.
+	Domain string `json:"domain"`
 	// DBBackend is "embedded" (the server runs its own local Postgres) or
 	// "external" (connect to DatabaseURL). Empty is treated as "external", the
 	// managed default. DatabaseURL carries the external connection.
@@ -205,8 +211,9 @@ func present(key, fileValue string) bool {
 
 // Wizard runs the first-run prompts on stdin, writing answers into fc. It's a
 // straight walk-through — one decision at a time, each a choice plus its config
-// where the choice needs one: reachability, port, database (embedded / your own
-// URL), then media (local files / S3-MinIO). Each prompt shows the
+// where the choice needs one: reachability (this computer / the LAN / a public
+// domain), port, database (embedded / your own URL), then media (local files /
+// S3-MinIO). Each prompt shows the
 // current-or-default value in [brackets]; an empty line keeps it. dataDir is
 // where the filesystem media root is placed (<dataDir>/media). Callers gate this
 // on an interactive terminal, then run EnsureSecret + Save.
@@ -227,26 +234,75 @@ func Wizard(fc *FileConfig, dataDir string) {
 }
 
 // askReachability asks who can reach the server and returns the bind host:
-// 127.0.0.1 (this machine only, the default) or 0.0.0.0 (the LAN, over plain
-// HTTP — fine on a trusted network, per LOCAL_MODE.md §8/§10).
+// 127.0.0.1 (this machine only, the default), 0.0.0.0 (the LAN, over plain
+// HTTP — fine on a trusted network, per LOCAL_MODE.md §8/§10), or a public
+// domain, which ALSO binds 127.0.0.1 because a reverse proxy fronts it.
+//
+// That third answer surprises people, so: on a rented VPS the machine is on the
+// public internet, and plain HTTP there means every password crosses it
+// readable. Caddy terminates TLS on 443 and forwards to us on localhost — so
+// binding wider would only expose the unencrypted port beside the encrypted
+// one. See askDomain for why the server doesn't do TLS itself.
 func askReachability(r *bufio.Reader, fc *FileConfig) string {
 	fmt.Println()
 	fmt.Println("Who should be able to reach this server?")
 	fmt.Println("  1) This computer only")
 	fmt.Println("  2) Other devices on my network (LAN) — plain HTTP, trusted networks only")
+	fmt.Println("  3) Anyone, at a domain name (a rented VPS — HTTPS, set up at the end)")
 	def := "1"
-	if fc.Host == "0.0.0.0" {
+	switch {
+	case fc.Domain != "":
+		def = "3"
+	case fc.Host == "0.0.0.0":
 		def = "2"
 	}
 	fmt.Printf("Choice [%s]: ", def)
-	switch readLine(r) {
-	case "":
-		return hostFor(def)
+	choice := readLine(r)
+	if choice == "" {
+		choice = def
+	}
+	switch choice {
+	case "3":
+		askDomain(r, fc)
+		return "127.0.0.1"
 	case "2":
+		// Clear the domain on the way past, or a config that used to be public
+		// keeps printing Caddy instructions for a server that isn't.
+		fc.Domain = ""
 		return "0.0.0.0"
 	default:
+		fc.Domain = ""
 		return "127.0.0.1"
 	}
+}
+
+// askDomain collects the public name an internet-facing install answers on.
+//
+// Bombers deliberately does NOT terminate TLS itself. It could — Go ships the
+// pieces — but certificates are issued for ports 80 and 443, and binding those
+// on Linux needs root or a capability grant. The whole install path is built so
+// that nothing in the normal flow needs sudo, and a reverse proxy is already a
+// system service holding exactly those privileges. So the trade is: one more
+// program on a VPS, and the server stays an ordinary unprivileged process.
+func askDomain(r *bufio.Reader, fc *FileConfig) {
+	fmt.Println()
+	fmt.Println("  The domain has to point at this machine before HTTPS can work —")
+	fmt.Println("  an A record aimed at its IP. That DNS entry IS the proof of")
+	fmt.Println("  ownership the certificate authority checks.")
+	fc.Domain = cleanDomain(ask(r, "Domain", fc.Domain, "bombers.example.com"))
+	if !strings.Contains(fc.Domain, ".") {
+		fmt.Println("  ! Note: that doesn't look like a public domain, and a certificate")
+		fmt.Println("    authority can only issue for one that resolves on the internet.")
+	}
+}
+
+// cleanDomain keeps just the host out of whatever got pasted — people type a
+// scheme and a trailing slash out of habit, and a Caddyfile wants neither.
+func cleanDomain(in string) string {
+	out := strings.TrimSpace(in)
+	out = strings.TrimPrefix(out, "https://")
+	out = strings.TrimPrefix(out, "http://")
+	return strings.Trim(out, "/")
 }
 
 // askPort asks for the HTTP port, keeping the current-or-1337 default and
@@ -334,14 +390,6 @@ func askS3Details(r *bufio.Reader, fc *FileConfig) {
 	fc.S3SecretKey = ask(r, "S3 secret key", fc.S3SecretKey, "hanascript")
 	fc.S3Bucket = ask(r, "S3 bucket", fc.S3Bucket, "bombers-media")
 	fc.S3UseSSL = askBool(r, "Use TLS for S3 (https)", fc.S3UseSSL)
-}
-
-// hostFor maps the reachability choice to a bind host.
-func hostFor(choice string) string {
-	if choice == "2" {
-		return "0.0.0.0"
-	}
-	return "127.0.0.1"
 }
 
 // ask prints "label [default]: " and returns the trimmed input, or the default
