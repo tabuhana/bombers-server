@@ -375,9 +375,7 @@ func buildAndServe() (*app, error) {
 	authService := auth.NewService(issuer, pool)
 	authHandler := auth.NewHandler(authService)
 	usersHandler := users.NewHandler(pool, authService)
-	// Discord is the way in. Password login below stays for now: the desktop
-	// client still uses it, and removing it first would lock the operator out of
-	// his own server.
+	// Discord is the only way in.
 	discordHandler := users.NewDiscordHandler(pool, authService, cfg)
 	if discordHandler.Configured() {
 		logx.Info("discord sign-in ready (signups: %s)", cfg.SignupMode)
@@ -408,8 +406,9 @@ func buildAndServe() (*app, error) {
 		AllowedHeaders: []string{"Authorization", "Content-Type"},
 	}))
 	r.Get("/health", healthHandler(pool, storage))
-	r.Post("/auth/register", usersHandler.Register)
-	r.Post("/auth/login", usersHandler.Login)
+	// No password routes. Discord is the only way in, so there is nothing to
+	// register and nothing to reset — refresh stays, because a session still
+	// rotates the same way once you have one.
 	r.Post("/auth/refresh", authHandler.Refresh)
 	// Unauthenticated by definition — this is what you use before you have a
 	// session. start and callback are browser redirects; claim and signup are
