@@ -4,7 +4,12 @@ The Go backend for **Bombers**. See [`PRODUCT.md`](./PRODUCT.md) for the product
 
 The Tauri/React client lives in a separate repo — this codebase is server-only.
 
-## Run your own server
+> **The server runs on Linux.** It's developed on a Windows desktop and deployed
+> to Linux — an Arch laptop and an Ubuntu VPS — and that's the only place it's
+> expected to run. Go compiles for Windows and macOS if you ask it to, but
+> nothing here is tested there and the install path assumes a Unix filesystem.
+
+## Running it
 
 Five commands, from inside the folder you cloned. You never type `go` or `goose`.
 
@@ -24,21 +29,14 @@ binary is missing or out of date, then runs it. That's why a fresh clone needs n
 `go build`. After `install`, the script is out of the picture — you just type
 `bombers` from anywhere.
 
-> **On Windows**, use `.\bombers install` in PowerShell or cmd — the `.\` matters.
-> A bare `bombers` in cmd.exe finds the extensionless POSIX script sitting next to
-> the Windows one, can't execute it, and stops there with a confusing error.
-
 `install` and `setup` are deliberately separate: reconfiguring later never means
 reinstalling. `install` builds and records where your checkout lives (in
 `<dataDir>/install.json`, so `update` works from any directory); it configures
 nothing and touches no database.
 
-The binary lands in `/usr/local/bin` when that's writable, otherwise
-`~/.local/bin` — and on Windows, `%LOCALAPPDATA%\Programs\Bombers`, which
-`install` adds to your user PATH for you (no admin needed; the machine-wide PATH
-is never touched). **Open a new terminal after installing** — the one you ran it
-in still has the PATH it started with. On Linux and macOS it prints the `export`
-line to add instead, since there's no shell config it can safely edit for you.
+The binary lands in `/usr/local/bin` when that's writable (a container running as
+root), otherwise `~/.local/bin`. If that directory isn't on your PATH, `install`
+prints the `export` line to add — it won't edit a shell config for you.
 
 ### Requirements
 
@@ -109,11 +107,23 @@ You'll also want it running after a reboot — see **Start on boot** below.
 
 ### Where things live
 
-The data directory is `%AppData%\Bombers` on Windows,
-`~/Library/Application Support/Bombers` on macOS, `~/.config/Bombers` on Linux —
-or wherever `BOMBERS_DATA_DIR` points. It holds `config.json`, `install.json`,
-`server.log`, the pidfile, filesystem media, and the embedded Postgres data
-directory and cached binaries.
+The data directory is `~/.config/Bombers`, or wherever `BOMBERS_DATA_DIR` points.
+It holds `config.json`, `install.json`, `server.log`, the pidfile, filesystem
+media, and the embedded Postgres data directory and cached binaries.
+
+**That one directory is the whole server.** Everything the server owns is in it,
+which is what makes backing up and moving to another machine a copy:
+
+```bash
+bombers stop
+tar czf bombers-backup.tar.gz ~/.config/Bombers
+bombers start
+```
+
+Stop first — a Postgres data directory copied while it's running may not restore.
+To move machines, install there, untar, start, and repoint DNS. Which is also why
+clients should be given a domain rather than an IP: then a move is a DNS change
+and nobody has to re-enter anything.
 
 ### The rest of the commands
 
@@ -145,12 +155,11 @@ start the server; that stays a separate act. Start it again with `bombers start`
 
 ### Start on boot
 
-`bombers start` is enough to run in the background day to day. Register an OS
-service (Windows Service / systemd / launchd) when you want start-on-boot and
-restart-on-failure:
+`bombers start` is enough to run in the background day to day. Register it as a
+systemd service when you want start-on-boot and restart-on-failure:
 
 ```bash
-bombers service install     # ADMIN PowerShell on Windows, sudo on Linux/macOS
+sudo bombers service install
 bombers service start
 ```
 
@@ -158,10 +167,8 @@ Also: `service stop | restart | status | uninstall`. Run `bombers setup` first �
 a service has no terminal to answer the wizard on, so it refuses to start with an
 incomplete config.
 
-> **Windows:** the service runs as LocalSystem, which resolves a *different* data
-> directory than your user account. Set a machine-level `BOMBERS_DATA_DIR`
-> (`setx BOMBERS_DATA_DIR C:\ProgramData\Bombers /M`), then run `bombers setup`,
-> then install the service — otherwise it starts, finds no config, and stops.
+Once it's a service, the routine after a `git pull` is `bombers update` (rebuild
+and migrate) followed by a `service restart`.
 
 `bombers uninstall` is the full teardown: it deregisters the service, then —
 after a confirmation, or `--yes` for scripts — deletes the entire data directory

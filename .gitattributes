@@ -1,9 +1,6 @@
 # The launcher is a POSIX shell script: it MUST keep LF endings or a Linux
 # checkout gets "#!/bin/sh" and fails with a confusing bad-interpreter error.
+# The code is edited on a Windows desktop and only ever RUNS on Linux, so this
+# matters more than it looks like it should.
 bombers text eol=lf
 *.sh text eol=lf
-
-# Its Windows sibling wants the opposite: cmd.exe reads a batch file line by
-# line as it runs it, and LF endings break multi-line constructs in ways that
-# only show up when execution reaches them.
-*.cmd text eol=crlf

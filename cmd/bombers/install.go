@@ -76,10 +76,6 @@ func loadInstallRecord() (installRecord, error) {
 // installDir picks where the binary goes: a system location when we can write
 // there without help, otherwise the user's own bin directory. Never sudo.
 func installDir() (string, error) {
-	// Windows shares neither destination — see path_windows.go.
-	if isWindows() {
-		return windowsInstallDir()
-	}
 	if writable("/usr/local/bin") {
 		return "/usr/local/bin", nil
 	}
@@ -154,35 +150,9 @@ func runInstall(_ []string) {
 	fmt.Printf("  binary:  %s\n", target)
 	fmt.Printf("  source:  %s\n", source)
 	fmt.Println()
-	// onPath reads THIS process's PATH, so on Windows it stays false right after
-	// we've edited the stored one — which is the truth worth telling you anyway:
-	// this terminal can't see it yet.
-	newPath := false
 	if !onPath(dir) {
-		switch {
-		case !isWindows():
-			fmt.Printf("  %s isn't on your PATH yet. Add this to your shell config:\n\n", dir)
-			fmt.Printf("      export PATH=\"%s:$PATH\"\n\n", dir)
-		default:
-			added, err := addToUserPath(dir)
-			switch {
-			case err != nil:
-				fmt.Printf("  %s isn't on your PATH, and adding it didn't work: %v\n", dir, err)
-				fmt.Println("  Add it yourself, in PowerShell:")
-				fmt.Printf("\n      [Environment]::SetEnvironmentVariable('Path',[Environment]::GetEnvironmentVariable('Path','User')+';%s','User')\n\n", dir)
-			case added:
-				newPath = true
-				fmt.Printf("  Added to your PATH:  %s\n\n", dir)
-			default:
-				// Already stored — this terminal just started before it was.
-				newPath = true
-				fmt.Printf("  Already on your PATH:  %s\n\n", dir)
-			}
-		}
-	}
-	if newPath {
-		fmt.Println("  Open a NEW terminal first — this one still has the old PATH.")
-		fmt.Println()
+		fmt.Printf("  %s isn't on your PATH yet. Add this to your shell config:\n\n", dir)
+		fmt.Printf("      export PATH=\"%s:$PATH\"\n\n", dir)
 	}
 	fmt.Println("  Next:  bombers setup     configure the database + media, and migrate")
 	fmt.Println("         bombers start     run it in the background")
