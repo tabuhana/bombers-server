@@ -17,6 +17,14 @@ const (
 	defaultS3Bucket   = "bombers-media"
 )
 
+// Who may create an account, via SIGNUP_MODE.
+const (
+	// SignupList — only Discord ids on the allowlist. The default.
+	SignupList = "list"
+	// SignupOpen — anyone who signs in with Discord.
+	SignupOpen = "open"
+)
+
 type Config struct {
 	// Host is the bind interface. Empty means all interfaces (":"+Port), which
 	// preserves the managed default; local mode may set 127.0.0.1 or 0.0.0.0.
@@ -61,6 +69,15 @@ type Config struct {
 	DiscordClientID     string
 	DiscordClientSecret string
 	DiscordRedirectURL  string
+
+	// SignupMode is "list" (default — only Discord ids on the allowlist may
+	// create an account) or "open" (anyone who signs in with Discord gets one).
+	//
+	// It defaults to closed because the cost of the two mistakes isn't
+	// symmetrical: a friend who can't sign up sends you a message, and a
+	// stranger who can is already in. Opening it later is a one-line change to
+	// the environment, which is the right shape for something you do once.
+	SignupMode string
 
 	// MediaBackend selects where media bytes live: "s3" (default — external/
 	// managed object storage) or "fs" (plain files on local disk, self-host).
@@ -135,6 +152,7 @@ func Load() (*Config, error) {
 		DiscordClientID:     os.Getenv("DISCORD_CLIENT_ID"),
 		DiscordClientSecret: os.Getenv("DISCORD_CLIENT_SECRET"),
 		DiscordRedirectURL:  os.Getenv("DISCORD_REDIRECT_URL"),
+		SignupMode:          optional("SIGNUP_MODE", SignupList),
 		MediaBackend:        mediaBackend,
 		MediaDir:            optional("MEDIA_DIR", ""),
 		S3Endpoint:          optional("S3_ENDPOINT", defaultS3Endpoint),

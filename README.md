@@ -208,6 +208,10 @@ startup. Anything the environment doesn't set falls back to the saved
 | `S3_USE_SSL`          | no                          | `false`                  | `true` for https endpoints (VPS MinIO / R2). |
 | `CORS_ALLOWED_ORIGIN` | no                          | `http://localhost:1420`  | Extra browser origins, comma-separated (the website, a dev client). The packaged client is always allowed — see below. |
 | `ADMIN_USERNAME`      | no                          | —                        | Promotes that account to admin at boot. An unknown name warns, it doesn't fail. |
+| `DISCORD_CLIENT_ID`   | to sign anyone in           | —                        | From the Discord developer portal. |
+| `DISCORD_CLIENT_SECRET` | to sign anyone in         | —                        | Lives here and never in the client — a desktop app can't keep a secret. |
+| `DISCORD_REDIRECT_URL` | to sign anyone in          | —                        | Must match a redirect registered on the Discord app **exactly**. |
+| `SIGNUP_MODE`         | no                          | `list`                   | `list` (only Discord ids on the allowlist may create an account) or `open`. |
 | `AUTO_MIGRATE`        | no                          | `false`                  | Apply pending migrations at startup (for container hosts). |
 | `LOG_TIME_FORMAT`     | no                          | `datetime`               | `time` · `datetime` · `iso`. The console's `logtime` switches it live. |
 | `BOMBERS_DATA_DIR`    | no                          | per-OS config dir        | Override where config, logs, media and the embedded DB live. |
