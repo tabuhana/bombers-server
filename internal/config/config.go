@@ -48,6 +48,20 @@ type Config struct {
 	// a fresh deploy is "server up, then sign up".
 	AdminUsername string
 
+	// Discord OAuth — how people sign in. There is no password anywhere in the
+	// product, so an unset client ID means nobody can log in at all.
+	//
+	// The SECRET lives here rather than in the desktop client on purpose: a
+	// client ships to users and cannot keep one. So the server performs the code
+	// exchange, and Discord only ever redirects here.
+	//
+	// DiscordRedirectURL must match a redirect registered on the Discord
+	// application EXACTLY — Discord does not pattern-match — which is why it's
+	// configuration and not derived from the request.
+	DiscordClientID     string
+	DiscordClientSecret string
+	DiscordRedirectURL  string
+
 	// MediaBackend selects where media bytes live: "s3" (default — external/
 	// managed object storage) or "fs" (plain files on local disk, self-host).
 	// MediaDir is the filesystem root when the backend is "fs".
@@ -115,13 +129,19 @@ func Load() (*Config, error) {
 		TokenSecret:       require("TOKEN_SECRET"),
 		CorsAllowedOrigin: optional("CORS_ALLOWED_ORIGIN", defaultCorsAllowedOrigin),
 		AdminUsername:     os.Getenv("ADMIN_USERNAME"),
-		MediaBackend:      mediaBackend,
-		MediaDir:          optional("MEDIA_DIR", ""),
-		S3Endpoint:        optional("S3_ENDPOINT", defaultS3Endpoint),
-		S3AccessKey:       requireS3("S3_ACCESS_KEY"),
-		S3SecretKey:       requireS3("S3_SECRET_KEY"),
-		S3Bucket:          optional("S3_BUCKET", defaultS3Bucket),
-		S3UseSSL:          os.Getenv("S3_USE_SSL") == "true",
+		// Not required: a server with these unset still boots, serves, and lets
+		// existing sessions work — it just can't sign anybody new in. Failing to
+		// start would be worse than saying so at the one endpoint that needs them.
+		DiscordClientID:     os.Getenv("DISCORD_CLIENT_ID"),
+		DiscordClientSecret: os.Getenv("DISCORD_CLIENT_SECRET"),
+		DiscordRedirectURL:  os.Getenv("DISCORD_REDIRECT_URL"),
+		MediaBackend:        mediaBackend,
+		MediaDir:            optional("MEDIA_DIR", ""),
+		S3Endpoint:          optional("S3_ENDPOINT", defaultS3Endpoint),
+		S3AccessKey:         requireS3("S3_ACCESS_KEY"),
+		S3SecretKey:         requireS3("S3_SECRET_KEY"),
+		S3Bucket:            optional("S3_BUCKET", defaultS3Bucket),
+		S3UseSSL:            os.Getenv("S3_USE_SSL") == "true",
 	}
 
 	if len(missing) > 0 {
