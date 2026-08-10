@@ -70,6 +70,11 @@ type Config struct {
 	DiscordClientSecret string
 	DiscordRedirectURL  string
 
+	// WebsiteURL is where a login started on the website returns to. Required
+	// only for that half — the desktop client's return address is built from a
+	// port it supplies, never from configuration.
+	WebsiteURL string
+
 	// SignupMode is "list" (default — only Discord ids on the allowlist may
 	// create an account) or "open" (anyone who signs in with Discord gets one).
 	//
@@ -152,6 +157,7 @@ func Load() (*Config, error) {
 		DiscordClientID:     os.Getenv("DISCORD_CLIENT_ID"),
 		DiscordClientSecret: os.Getenv("DISCORD_CLIENT_SECRET"),
 		DiscordRedirectURL:  os.Getenv("DISCORD_REDIRECT_URL"),
+		WebsiteURL:          os.Getenv("WEBSITE_URL"),
 		SignupMode:          optional("SIGNUP_MODE", SignupList),
 		MediaBackend:        mediaBackend,
 		MediaDir:            optional("MEDIA_DIR", ""),

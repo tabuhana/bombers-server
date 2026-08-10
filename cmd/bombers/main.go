@@ -375,6 +375,15 @@ func buildAndServe() (*app, error) {
 	authService := auth.NewService(issuer, pool)
 	authHandler := auth.NewHandler(authService)
 	usersHandler := users.NewHandler(pool, authService)
+	// Discord is the way in. Password login below stays for now: the desktop
+	// client still uses it, and removing it first would lock the operator out of
+	// his own server.
+	discordHandler := users.NewDiscordHandler(pool, authService, cfg)
+	if discordHandler.Configured() {
+		logx.Info("discord sign-in ready (signups: %s)", cfg.SignupMode)
+	} else {
+		logx.Warn("discord sign-in is NOT configured — set DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URL; nobody new can sign in")
+	}
 	friendsHandler := friends.NewHandler(pool)
 	profilesHandler := profiles.NewHandler(pool)
 	messagingHandler := messaging.NewHandler(pool)
@@ -402,6 +411,14 @@ func buildAndServe() (*app, error) {
 	r.Post("/auth/register", usersHandler.Register)
 	r.Post("/auth/login", usersHandler.Login)
 	r.Post("/auth/refresh", authHandler.Refresh)
+	// Unauthenticated by definition — this is what you use before you have a
+	// session. start and callback are browser redirects; claim and signup are
+	// requests the client makes for itself, which is why the tokens are there
+	// and not in a redirect.
+	r.Get("/auth/discord/start", discordHandler.Start)
+	r.Get("/auth/discord/callback", discordHandler.Callback)
+	r.Post("/auth/discord/claim", discordHandler.Claim)
+	r.Post("/auth/discord/signup", discordHandler.Signup)
 	// What a token may be granted. A constant, and a client needs it before it
 	// has anywhere to put a token, so it sits outside the auth group.
 	r.Get("/token-scopes", tokensHandler.Scopes)

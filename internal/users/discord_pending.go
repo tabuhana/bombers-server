@@ -25,6 +25,10 @@ const (
 	// because a person is typing at a prompt, and re-authorizing to fix a typo
 	// would be miserable.
 	signupTicketTTL = 20 * time.Minute
+	// A finished login waiting to be picked up. Seconds, not minutes: the
+	// browser is redirected the instant it's issued and the client claims it
+	// immediately, so anything longer is a window for nothing.
+	handoffTTL = 2 * time.Minute
 )
 
 // PendingLogin is a login that has left for Discord and not come back.
@@ -51,21 +55,62 @@ type SignupTicket struct {
 	ExpiresAt time.Time
 }
 
-// PendingStore holds both, expiring them as it goes.
+// handoff is a completed login waiting for the client to collect it.
+//
+// The browser is redirected with a code rather than with tokens, so an access
+// token never lands in a URL, browser history, or a referrer header. The client
+// trades the code for the real pair over HTTPS, once.
+type handoff struct {
+	UserID    string
+	ExpiresAt time.Time
+}
+
+// PendingStore holds all three, expiring them as it goes.
 type PendingStore struct {
-	mu      sync.Mutex
-	logins  map[string]PendingLogin
-	tickets map[string]SignupTicket
+	mu       sync.Mutex
+	logins   map[string]PendingLogin
+	tickets  map[string]SignupTicket
+	handoffs map[string]handoff
 	// now is time.Now except in tests.
 	now func() time.Time
 }
 
 func NewPendingStore() *PendingStore {
 	return &PendingStore{
-		logins:  make(map[string]PendingLogin),
-		tickets: make(map[string]SignupTicket),
-		now:     time.Now,
+		logins:   make(map[string]PendingLogin),
+		tickets:  make(map[string]SignupTicket),
+		handoffs: make(map[string]handoff),
+		now:      time.Now,
 	}
+}
+
+// IssueHandoff parks a signed-in user for the client to collect.
+func (s *PendingStore) IssueHandoff(userID string) (string, error) {
+	code, err := randomToken()
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked()
+	s.handoffs[code] = handoff{UserID: userID, ExpiresAt: s.now().Add(handoffTTL)}
+	return code, nil
+}
+
+// ClaimHandoff trades a code for the user it belongs to. Single use — a code
+// that worked twice would hand a second session to whoever replayed it.
+func (s *PendingStore) ClaimHandoff(code string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h, ok := s.handoffs[code]
+	if !ok {
+		return "", false
+	}
+	delete(s.handoffs, code)
+	if s.now().After(h.ExpiresAt) {
+		return "", false
+	}
+	return h.UserID, true
 }
 
 // StartLogin records a login in flight and returns the opaque `state` to hand
@@ -155,6 +200,11 @@ func (s *PendingStore) sweepLocked() {
 	for k, v := range s.tickets {
 		if now.After(v.ExpiresAt) {
 			delete(s.tickets, k)
+		}
+	}
+	for k, v := range s.handoffs {
+		if now.After(v.ExpiresAt) {
+			delete(s.handoffs, k)
 		}
 	}
 }
