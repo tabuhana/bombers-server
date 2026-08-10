@@ -22,16 +22,18 @@ This document defines the server's *shape, contracts, and decisions*. Detailed e
 ## What the server is NOT
 
 - Not authoritative over a user's *working* copy. Local client is the editing source of truth; the server holds the *published* copy.
-- Not a federation hub. Self-hosting is supported (§Self-hosting / Running below), but every server — official or private — is an isolated island: no cross-server friends, sharing, or messaging (see `PRODUCT.md`).
+- Not a federation hub. Self-hosting works (§Running a server below) without being a goal, and every server — official or private — is an isolated island: no cross-server friends, sharing, or messaging (see `PRODUCT.md`).
 - Not a general media/blob host **yet**. The S3 phase has begun — **profile media (avatar/banner) is built** — but the heavier media (photo libraries, DM image attachments, note-attachment sync, room files) still waits for its later slices. Don't build those piecemeal; each gets designed when picked up.
 - Not coupled to the Tauri client specifically. The API is the product; the client is one consumer. Other (out-of-scope) consumers may exist, so keep the API clean and client-agnostic.
 - Not built for massive scale. Tens of users. Don't over-engineer.
 
-## Self-hosting / Running
+## Running a server
 
-Self-hosting is first-class: run the same binary the official server runs, point the client at it from the login screen's server picker, and you have your own island (no federation — see above).
+**On Linux.** Developed on a Windows desktop, deployed to an Arch laptop and an Ubuntu VPS. Nothing else is tested.
 
-**Requirements:** a PostgreSQL database and the Go binary (`go build ./cmd/bombers` or `go run ./cmd/bombers`). Apply migrations with goose (`goose -dir migrations postgres $DATABASE_URL up`).
+Self-hosting *works* — same binary, point the client at it from the login screen's server picker, and it's your own island (no federation — see above). As of 2026-08-06 it stopped being a **goal**: the owner runs Bombers for himself and his friends, so the capability stays and the audience-building doesn't. See `PRODUCT.md` §Who this is for.
+
+**Requirements:** the Go toolchain, and that's it — `./bombers install` builds from the checkout, and `bombers setup` offers a bundled Postgres and filesystem media so there's nothing else to install. A PostgreSQL of your own and S3-compatible storage are both supported picks, not prerequisites. Migrations are embedded and applied by `setup` and `update`; the goose CLI is only for rollbacks and authoring.
 
 **Environment variables** (a `.env` in the working directory is loaded automatically):
 
@@ -106,7 +108,7 @@ Note the asymmetry: **DMs persist, rooms don't.** DM history is retained **indef
 - **Other (web / out-of-scope) consumers get a real expiration.** Same auth system; the client *kind* decides how aggressively to retain tokens (e.g. shorter-lived or non-rotating refresh for browser sessions). Token issuance can be tagged with a client kind — design when those consumers actually exist.
 - Tokens stored in **secure OS storage** (keychain via Tauri), never localStorage.
 - Access token on every HTTP request (`Authorization: Bearer`) and on WebSocket connect.
-- **Google / Discord OAuth — anticipated but deferred.** Not in v1. Build username+password first; keep the auth design from painting us into a corner so a third-party identity path can be added later without rework.
+- **Discord OAuth — wanted, not yet built.** The owner asked for sign-in with Discord and linking a Discord account (2026-08-06). **Google is dropped** — it was only ever listed alongside Discord and nobody wants it. Undecided, and it changes a lot: whether Discord *replaces* username+password or sits beside it. If it replaces it, password reset — which does not exist in any form today — stops being a problem that needs solving.
 
 ## Sync / publish contract (the heart of client↔server)
 
@@ -217,7 +219,7 @@ Each `internal/<domain>` package owns its own routes, logic, and queries — kep
 
 These are settled — build to them, don't re-litigate:
 
-1. **Auth:** unique username + password for v1. Short access token (~15 min) + long **rotating** refresh token. Desktop effectively never logs out (rotation); web/other consumers get real expiration. Tokens in secure OS storage. Google/Discord OAuth anticipated but deferred. (See "Auth model".)
+1. **Auth:** unique username + password for v1. Short access token (~15 min) + long **rotating** refresh token. Desktop effectively never logs out (rotation); web/other consumers get real expiration. Tokens in secure OS storage. Discord OAuth is wanted and unbuilt; Google is dropped. (See "Auth model".)
 2. **Published content storage:** note bodies in **Postgres**. Heavy blobs are NOT a v1 concern — they wait for the S3 phase. (See "Tech stack".)
 3. **DM retention:** **forever**, in Postgres (text). Image attachments deferred to the S3 phase and will persist like text.
 4. **Sync trigger:** debounced-autosync (push after an editing pause) is a trigger, not a new mode.

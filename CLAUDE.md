@@ -55,7 +55,11 @@ The repo is **no longer spec-only** — a working HTTP API is in place. The doc 
 
 The **Bombers Server** — the Go backend half of Bombers. The Tauri/React client lives in a **separate codebase**; this repo is server-only. The API is the product, and the desktop client is just one consumer — never bake client-specific assumptions into endpoints.
 
-Scope is friends-and-family (tens of users per instance). Don't over-engineer for scale or federation; **self-hosting is supported and first-class** — anyone can run the binary as their own server, and the client picks a server on its login screen — but every server (official or private) is an **isolated island**: no cross-server anything (per `PRODUCT.md`; how to run one: `SERVER.md` §Self-hosting / Running).
+Scope is the owner and his friends (tens of users, permanently). Don't over-engineer for scale or federation.
+
+**It runs on Linux.** Developed on a Windows desktop, deployed to an Arch laptop and an Ubuntu VPS — that's the whole world. Go will cross-compile elsewhere; nothing there is tested and the install path assumes a Unix filesystem. Don't add platform-specific code for Windows or macOS.
+
+**Self-hosting works but isn't a goal** (2026-08-06). The `bombers` CLI, the setup wizard and the server picker all exist and function — the owner uses them to run his own instance — but making that good *for strangers* stopped being something to invest in. Keep the capability, don't build an audience for it. Every server (official or private) is an **isolated island**: no cross-server anything (per `PRODUCT.md`).
 
 ## Stack (per `SERVER.md`, ratify during planning)
 
@@ -86,8 +90,8 @@ Each `internal/<domain>` owns its own routes, logic, and queries (typical files:
 
 Standard Go workflow (no `Makefile`):
 
-The binary is a `bombers <command>` CLI. **The whole self-hosted flow is five
-commands and never mentions Go or goose:**
+The binary is a `bombers <command>` CLI. **Running a server is five commands and
+never mentions Go or goose:**
 
 ```bash
 ./bombers install    # once, from a fresh clone: builds + puts `bombers` on your PATH
@@ -149,7 +153,7 @@ go vet ./...
 gofmt -w .
 ```
 
-A local Postgres + MinIO are available via `docker compose up -d` (Postgres uses `DB_NAME`/`DB_USER`/`DB_PASSWORD`, binds 5432; MinIO uses `S3_ACCESS_KEY`/`S3_SECRET_KEY`, binds 9000 + console 9001 — the server creates the media bucket itself on startup). `server.exe` in the repo root is a stale committed build artifact — `.gitignore` excludes `*.exe`, so don't rely on or re-commit it; rebuild with `go build`.
+A local Postgres + MinIO are available via `docker compose up -d` (Postgres uses `DB_NAME`/`DB_USER`/`DB_PASSWORD`, binds 5432; MinIO uses `S3_ACCESS_KEY`/`S3_SECRET_KEY`, binds 9000 + console 9001 — the server creates the media bucket itself on startup). A `server.exe` may be sitting in the repo root on the Windows dev machine: it's an untracked leftover, not a committed artifact (`.gitignore` excludes `*.exe`) — ignore it and rebuild with `go build`.
 
 ### Container hosts (Railway, Fly, plain Docker)
 

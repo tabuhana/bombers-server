@@ -37,11 +37,28 @@ A real backend that handles everything social and everything that must outlive a
 
 The server does the heavy lifting for anything multi-user. The client never talks peer-to-peer; the server is always the hub.
 
+## Who this is for
+
+**The owner and his friends.** Not a product, not a platform, not something
+courting users. The repository is public and nobody is stopped from running it,
+but strangers are not an audience to design for — if a decision is a trade
+between "better for us" and "better for a hypothetical self-hoster", it goes to
+us every time.
+
+That matters most in what it stops: no onboarding funnels for people who don't
+exist, no documentation written to persuade, no feature justified by adoption.
+Scale is tens of users on one machine, permanently.
+
 ## The official server vs. self-hosting
 
 There is **one official Bombers server**, hosted by the project owner on a VPS. By default the client connects to it.
 
-**Self-hosting is supported and first-class.** Anyone can run the server binary as their own private server, and the client picks which server to talk to on the login screen (defaulting to official). See `SERVER.md` §Self-hosting / Running for how. But every server — official or private — is a **fully disconnected island**:
+**Self-hosting works — it just isn't a goal.** The server picker, the setup
+wizard and the whole `bombers` CLI exist and function, because the owner uses
+them himself to run his own instance. What changed (2026-08-06) is that making
+that experience good *for other people* stopped being something to invest in.
+Don't remove the capability; don't build for an audience of self-hosters either.
+Every server — official or private — is a **fully disconnected island**:
 
 - **No federation. No cross-server anything.** No cross-server friends, sharing, or messaging. Accounts, friend codes, and content exist only on the server that created them; a session/token from one server means nothing to another.
 - Moving between servers means registering fresh on the new one. The project does not migrate accounts or content between servers.
