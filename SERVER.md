@@ -51,7 +51,9 @@ Self-hosting *works* — same binary, point the client at it from the login scre
 
 Alongside Postgres, the server now needs an **S3-compatible object store** for profile media: MinIO via `docker compose up -d` locally; MinIO-on-VPS or Cloudflare R2 in prod (plain S3 API only — nothing AWS-proprietary). Unreachable object storage at startup is fatal, same as the DB.
 
-**CORS:** a self-hoster must set `CORS_ALLOWED_ORIGIN` to the origin their client webview runs on, or every browser-side call is blocked. The packaged Tauri app's origin is `http://tauri.localhost` on Windows (`tauri://localhost` on macOS); the dev client is `http://localhost:1420` (the default).
+**CORS:** the **packaged client's origin (`http://tauri.localhost`) is always allowed**, in code, and is not configurable. It isn't a deployment choice — every built Windows client loads from it — and leaving it to configuration meant a server could work perfectly against the dev client while rejecting every real one, with a devtools CORS error as the only symptom.
+
+`CORS_ALLOWED_ORIGIN` carries the rest and takes a **comma-separated list**: the website, a dev client, whatever else. Default `http://localhost:1420` (the Vite dev origin). Trailing slashes are trimmed and duplicates collapse, because a browser sends the bare origin and a pasted one never matches. The allowed set is logged at startup.
 
 **Running:** by default the binary opens an interactive **admin console** on stdin (Minecraft-style):
 

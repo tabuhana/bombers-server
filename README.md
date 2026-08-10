@@ -206,7 +206,7 @@ startup. Anything the environment doesn't set falls back to the saved
 | `S3_ENDPOINT`         | no                          | `localhost:9000`         | `host:port`, no scheme. |
 | `S3_BUCKET`           | no                          | `bombers-media`          | Created on startup if missing. |
 | `S3_USE_SSL`          | no                          | `false`                  | `true` for https endpoints (VPS MinIO / R2). |
-| `CORS_ALLOWED_ORIGIN` | no                          | `http://localhost:1420`  | The client's origin (the Vite dev server by default). |
+| `CORS_ALLOWED_ORIGIN` | no                          | `http://localhost:1420`  | Extra browser origins, comma-separated (the website, a dev client). The packaged client is always allowed — see below. |
 | `ADMIN_USERNAME`      | no                          | —                        | Promotes that account to admin at boot. An unknown name warns, it doesn't fail. |
 | `AUTO_MIGRATE`        | no                          | `false`                  | Apply pending migrations at startup (for container hosts). |
 | `LOG_TIME_FORMAT`     | no                          | `datetime`               | `time` · `datetime` · `iso`. The console's `logtime` switches it live. |
@@ -223,6 +223,18 @@ S3_SECRET_KEY=minioadmin
 ```
 
 `.env` is gitignored — do not commit local secrets.
+
+### Which browser origins can call the server
+
+- The **packaged desktop client (`http://tauri.localhost`) is always allowed**, in
+  code. Every built client loads from that origin, so it isn't something a
+  deployment should be able to get wrong.
+- `CORS_ALLOWED_ORIGIN` adds the rest, comma-separated — the website, a dev
+  client running on another machine, and so on.
+- Trailing slashes are trimmed and duplicates collapse; browsers send the bare
+  origin, so a pasted `https://example.com/` would otherwise never match.
+- The full allowed set is logged at startup, so a wrong one is visible without
+  reproducing it.
 
 ## Container hosts (Railway, Fly, plain Docker)
 

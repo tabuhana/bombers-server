@@ -391,8 +391,10 @@ func buildAndServe() (*app, error) {
 	issuer.SetTokenResolver(tokensHandler)
 
 	r := chi.NewRouter()
+	allowedOrigins := corsOrigins(cfg.CorsAllowedOrigin)
+	logx.Info("allowing browser origins: %s", strings.Join(allowedOrigins, ", "))
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins: []string{cfg.CorsAllowedOrigin},
+		AllowedOrigins: allowedOrigins,
 		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		AllowedHeaders: []string{"Authorization", "Content-Type"},
 	}))
@@ -1158,6 +1160,40 @@ func runDoctor(_ []string) {
 	if failCount > 0 {
 		os.Exit(1)
 	}
+}
+
+// PackagedClientOrigin is where a built desktop client loads from.
+//
+// It is not a deployment choice — a packaged Tauri app on Windows serves itself
+// from this origin, always, on every machine. (A macOS build would use
+// tauri://localhost; there is no macOS build.)
+const PackagedClientOrigin = "http://tauri.localhost"
+
+// corsOrigins is the set of browser origins allowed to call this server.
+//
+// CORS_ALLOWED_ORIGIN carries the deployment-specific ones — the website, a dev
+// client — and takes a comma-separated list, because once a website exists there
+// is always more than one.
+//
+// The packaged client's origin is added unconditionally, and that's the point of
+// this function. Leaving it to configuration means a server that forgets it
+// rejects every real client it will ever have, while working perfectly against
+// the dev client the operator is testing with. The only symptom is a CORS error
+// in a devtools console nobody is going to open.
+func corsOrigins(configured string) []string {
+	origins := []string{PackagedClientOrigin}
+	seen := map[string]bool{PackagedClientOrigin: true}
+	for _, raw := range strings.Split(configured, ",") {
+		// A trailing slash makes an origin that never matches — browsers send
+		// the bare origin — and it's exactly what someone pastes from a URL bar.
+		origin := strings.TrimRight(strings.TrimSpace(raw), "/")
+		if origin == "" || seen[origin] {
+			continue
+		}
+		seen[origin] = true
+		origins = append(origins, origin)
+	}
+	return origins
 }
 
 // serverHolds reports whether a Bombers server is what's occupying host:port.
