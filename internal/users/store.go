@@ -61,7 +61,7 @@ func insertUser(ctx context.Context, pool *pgxpool.Pool, u *User) error {
 }
 
 const getUserByCanonicalSQL = `
-SELECT id, username, username_canonical, password_hash, friend_code, created_at,
+SELECT id, username, username_canonical, COALESCE(password_hash, ''), friend_code, created_at,
        banned_at IS NOT NULL
 FROM users
 WHERE username_canonical = $1
@@ -85,7 +85,7 @@ func getUserByCanonical(ctx context.Context, pool *pgxpool.Pool, canonical strin
 }
 
 const getUserByIDSQL = `
-SELECT id, username, username_canonical, password_hash, friend_code, created_at, is_admin
+SELECT id, username, username_canonical, COALESCE(password_hash, ''), friend_code, created_at, is_admin
 FROM users
 WHERE id = $1
 `
