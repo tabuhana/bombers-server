@@ -8,19 +8,29 @@ import (
 	"testing"
 
 	"github.com/tabuhana/bombers-server/internal/config"
+	"github.com/tabuhana/bombers-server/internal/settings"
 )
 
-// testDiscordHandler builds one with a nil pool. Start never touches the
-// database, which is what makes the security-relevant half of this flow
-// testable without one.
-func testDiscordHandler(website string) *DiscordHandler {
-	return NewDiscordHandler(nil, nil, &config.Config{
-		DiscordClientID:     "client-id",
-		DiscordClientSecret: "client-secret",
-		DiscordRedirectURL:  "http://192.168.1.110:1337/auth/discord/callback",
-		WebsiteURL:          website,
-		SignupMode:          config.SignupList,
-	})
+// testDiscordHandler builds one with a nil pool and the settings supplied
+// through the ENVIRONMENT, which is what makes this testable without a database:
+// Resolve checks env first, so nothing here needs to reach the settings table.
+// Start never touches the pool either, which is the security-relevant half.
+func testDiscordHandler(t *testing.T, website string) *DiscordHandler {
+	t.Setenv("DISCORD_CLIENT_ID", "client-id")
+	t.Setenv("DISCORD_CLIENT_SECRET", "client-secret")
+	t.Setenv("DISCORD_REDIRECT_URL", "http://192.168.1.110:1337/auth/discord/callback")
+	t.Setenv("WEBSITE_URL", website)
+	t.Setenv("SIGNUP_MODE", config.SignupList)
+	return NewDiscordHandler(nil, nil, settings.New(nil))
+}
+
+// testUnconfiguredHandler has no Discord application at all.
+func testUnconfiguredHandler(t *testing.T) *DiscordHandler {
+	t.Setenv("DISCORD_CLIENT_ID", "")
+	t.Setenv("DISCORD_CLIENT_SECRET", "")
+	t.Setenv("DISCORD_REDIRECT_URL", "")
+	t.Setenv("WEBSITE_URL", "")
+	return NewDiscordHandler(nil, nil, settings.New(nil))
 }
 
 func get(h http.HandlerFunc, target string) *httptest.ResponseRecorder {
@@ -30,7 +40,7 @@ func get(h http.HandlerFunc, target string) *httptest.ResponseRecorder {
 }
 
 func TestStartRedirectsToDiscord(t *testing.T) {
-	h := testDiscordHandler("https://hanascript.com")
+	h := testDiscordHandler(t, "https://hanascript.com")
 	rec := get(h.Start, "/auth/discord/start?from=app&port=54321")
 
 	if rec.Code != http.StatusFound {
@@ -52,7 +62,7 @@ func TestStartRedirectsToDiscord(t *testing.T) {
 // An OAuth callback that redirects wherever it's told is an open redirect, and
 // it's the classic bug in exactly this position.
 func TestStartRejectsAnythingButAPort(t *testing.T) {
-	h := testDiscordHandler("https://hanascript.com")
+	h := testDiscordHandler(t, "https://hanascript.com")
 	for _, bad := range []string{
 		"",                         // missing
 		"notanumber",               //
@@ -71,7 +81,7 @@ func TestStartRejectsAnythingButAPort(t *testing.T) {
 }
 
 func TestStartFromWeb(t *testing.T) {
-	h := testDiscordHandler("https://hanascript.com")
+	h := testDiscordHandler(t, "https://hanascript.com")
 	rec := get(h.Start, "/auth/discord/start?from=web")
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
@@ -82,7 +92,7 @@ func TestStartFromWeb(t *testing.T) {
 }
 
 func TestStartFromWebNeedsAWebsite(t *testing.T) {
-	h := testDiscordHandler("")
+	h := testDiscordHandler(t, "")
 	rec := get(h.Start, "/auth/discord/start?from=web")
 	// Better to say the server isn't set up than to redirect somebody to "/".
 	if rec.Code != http.StatusServiceUnavailable {
@@ -91,7 +101,7 @@ func TestStartFromWebNeedsAWebsite(t *testing.T) {
 }
 
 func TestStartRejectsUnknownOrigin(t *testing.T) {
-	h := testDiscordHandler("https://hanascript.com")
+	h := testDiscordHandler(t, "https://hanascript.com")
 	for _, from := range []string{"", "desktop", "cli", "APP"} {
 		rec := get(h.Start, "/auth/discord/start?from="+from)
 		if rec.Code != http.StatusBadRequest {
@@ -101,7 +111,7 @@ func TestStartRejectsUnknownOrigin(t *testing.T) {
 }
 
 func TestStartWithoutADiscordApp(t *testing.T) {
-	h := NewDiscordHandler(nil, nil, &config.Config{SignupMode: config.SignupList})
+	h := testUnconfiguredHandler(t)
 	rec := get(h.Start, "/auth/discord/start?from=app&port=54321")
 	// Nobody can sign in, and the server should say so rather than sending a
 	// browser to a Discord URL with no client id in it.
@@ -111,7 +121,7 @@ func TestStartWithoutADiscordApp(t *testing.T) {
 }
 
 func TestCallbackWithoutAValidStateGoesNowhere(t *testing.T) {
-	h := testDiscordHandler("https://hanascript.com")
+	h := testDiscordHandler(t, "https://hanascript.com")
 	rec := get(h.Callback, "/auth/discord/callback?code=x&state=never-issued")
 
 	// No valid state means no verified place to send anybody, so this is the one
@@ -125,7 +135,7 @@ func TestCallbackWithoutAValidStateGoesNowhere(t *testing.T) {
 }
 
 func TestClaimRejectsAnUnknownCode(t *testing.T) {
-	h := testDiscordHandler("https://hanascript.com")
+	h := testDiscordHandler(t, "https://hanascript.com")
 	rec := httptest.NewRecorder()
 	h.Claim(rec, httptest.NewRequest(http.MethodPost, "/auth/discord/claim",
 		strings.NewReader(`{"code":"never-issued"}`)))
@@ -139,7 +149,7 @@ func TestClaimRejectsAnUnknownCode(t *testing.T) {
 // to the installer is the website terminal, so a client asking on behalf of an
 // identity with no account did not come through it.
 func TestRefusalWording(t *testing.T) {
-	h := testDiscordHandler("https://hanascript.com")
+	h := testDiscordHandler(t, "https://hanascript.com")
 
 	if got := h.refusalFor(PendingLogin{FromApp: true}); got != errNotAuthorized {
 		t.Errorf("app refusal = %q, want %q", got, errNotAuthorized)

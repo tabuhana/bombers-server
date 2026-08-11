@@ -1,6 +1,7 @@
 package users
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/discord"
 	"github.com/tabuhana/bombers-server/internal/httpx"
 	"github.com/tabuhana/bombers-server/internal/logx"
+	"github.com/tabuhana/bombers-server/internal/settings"
 	"github.com/tabuhana/bombers-server/internal/types"
 )
 
@@ -53,35 +55,50 @@ const (
 )
 
 // DiscordHandler owns the sign-in flow.
+//
+// It holds no configuration. The Discord application, the website address and
+// the signup mode are all read PER REQUEST from settings, because an operator
+// changes them at the console and the change has to take effect now rather than
+// at the next restart. A sign-in is rare enough that a settings read costs
+// nothing measurable.
 type DiscordHandler struct {
-	pool    *pgxpool.Pool
-	auth    *auth.Service
-	client  *discord.Client
-	pending *PendingStore
-
-	// signupMode is config.SignupList or config.SignupOpen.
-	signupMode string
-	// websiteURL is where a web login returns. Required for that half to work.
-	websiteURL string
+	pool     *pgxpool.Pool
+	auth     *auth.Service
+	settings *settings.Store
+	pending  *PendingStore
 }
 
-func NewDiscordHandler(pool *pgxpool.Pool, authSvc *auth.Service, cfg *config.Config) *DiscordHandler {
+func NewDiscordHandler(pool *pgxpool.Pool, authSvc *auth.Service, set *settings.Store) *DiscordHandler {
 	return &DiscordHandler{
-		pool: pool,
-		auth: authSvc,
-		client: &discord.Client{
-			ClientID:     cfg.DiscordClientID,
-			ClientSecret: cfg.DiscordClientSecret,
-			RedirectURL:  cfg.DiscordRedirectURL,
-		},
-		pending:    NewPendingStore(),
-		signupMode: cfg.SignupMode,
-		websiteURL: strings.TrimRight(cfg.WebsiteURL, "/"),
+		pool:     pool,
+		auth:     authSvc,
+		settings: set,
+		pending:  NewPendingStore(),
 	}
 }
 
-// Configured reports whether sign-in can work at all, for the startup log.
-func (h *DiscordHandler) Configured() bool { return h.client.Configured() }
+// client builds the Discord client from whatever the settings currently say.
+func (h *DiscordHandler) client(ctx context.Context) *discord.Client {
+	return &discord.Client{
+		ClientID:     h.settings.Get(ctx, settings.DiscordClientID),
+		ClientSecret: h.settings.Get(ctx, settings.DiscordClientSecret),
+		RedirectURL:  h.settings.Get(ctx, settings.DiscordRedirectURL),
+	}
+}
+
+func (h *DiscordHandler) websiteURL(ctx context.Context) string {
+	return strings.TrimRight(h.settings.Get(ctx, settings.WebsiteURL), "/")
+}
+
+func (h *DiscordHandler) signupMode(ctx context.Context) string {
+	return h.settings.Get(ctx, settings.SignupMode)
+}
+
+// Configured reports whether sign-in can work at all, for the startup log and
+// for the console.
+func (h *DiscordHandler) Configured(ctx context.Context) bool {
+	return h.client(ctx).Configured()
+}
 
 // Start sends the browser to Discord.
 //
@@ -93,8 +110,12 @@ func (h *DiscordHandler) Configured() bool { return h.client.Configured() }
 // open redirect. A port number can only ever become an address on the machine
 // that asked.
 func (h *DiscordHandler) Start(w http.ResponseWriter, r *http.Request) {
-	if !h.client.Configured() {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "this server has no Discord application configured, so nobody can sign in")
+	ctx := r.Context()
+	client := h.client(ctx)
+	if !client.Configured() {
+		httpx.WriteError(w, http.StatusServiceUnavailable,
+			"this server has no Discord application configured, so nobody can sign in "+
+				"(the operator sets it with `discord set` at the console)")
 		return
 	}
 
@@ -111,11 +132,12 @@ func (h *DiscordHandler) Start(w http.ResponseWriter, r *http.Request) {
 		// machine's hosts file says, and this has to mean the loopback.
 		returnTo = fmt.Sprintf("http://127.0.0.1:%d/", port)
 	case fromWeb:
-		if h.websiteURL == "" {
+		website := h.websiteURL(ctx)
+		if website == "" {
 			httpx.WriteError(w, http.StatusServiceUnavailable, "this server has no website configured")
 			return
 		}
-		returnTo = h.websiteURL + "/"
+		returnTo = website + "/"
 	default:
 		httpx.WriteError(w, http.StatusBadRequest, "from must be app or web")
 		return
@@ -127,7 +149,7 @@ func (h *DiscordHandler) Start(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "could not start a login")
 		return
 	}
-	http.Redirect(w, r, h.client.AuthorizeURL(state), http.StatusFound)
+	http.Redirect(w, r, client.AuthorizeURL(state), http.StatusFound)
 }
 
 // Callback is where Discord sends the browser back.
@@ -156,8 +178,9 @@ func (h *DiscordHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	client := h.client(ctx)
 
-	token, err := h.client.Exchange(ctx, code)
+	token, err := client.Exchange(ctx, code)
 	if err != nil {
 		logx.Error("discord: code exchange: %v", err)
 		h.bounce(w, r, pending, errLoginFailed, "")
@@ -165,9 +188,9 @@ func (h *DiscordHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 	// We only ever needed it to read two things. Handing it back means a stolen
 	// database contains no keys to anybody's Discord.
-	defer h.client.Revoke(ctx, token)
+	defer client.Revoke(ctx, token)
 
-	identity, err := h.client.Me(ctx, token)
+	identity, err := client.Me(ctx, token)
 	if err != nil {
 		logx.Error("discord: reading the account: %v", err)
 		h.bounce(w, r, pending, errLoginFailed, "")
@@ -177,7 +200,7 @@ func (h *DiscordHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// Connections are decoration on a person card. Failing to read them is not a
 	// failed login.
 	var connections []byte
-	if conns, cerr := h.client.Connections(ctx, token); cerr != nil {
+	if conns, cerr := client.Connections(ctx, token); cerr != nil {
 		logx.Warn("discord: reading connections for %s: %v", identity.ID, cerr)
 	} else {
 		connections = EncodeConnections(conns)
@@ -265,7 +288,7 @@ func (h *DiscordHandler) noAccount(w http.ResponseWriter, r *http.Request, pendi
 		return
 	}
 
-	if h.signupMode == config.SignupList {
+	if h.signupMode(ctx) == config.SignupList {
 		allowed, aerr := IsAllowed(ctx, h.pool, profile.ID)
 		if aerr != nil {
 			logx.Error("discord: allowlist check for %s: %v", profile.ID, aerr)

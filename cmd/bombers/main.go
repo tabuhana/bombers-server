@@ -42,6 +42,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/packs"
 	"github.com/tabuhana/bombers-server/internal/profiles"
 	"github.com/tabuhana/bombers-server/internal/rooms"
+	"github.com/tabuhana/bombers-server/internal/settings"
 	"github.com/tabuhana/bombers-server/internal/setup"
 	"github.com/tabuhana/bombers-server/internal/store"
 	"github.com/tabuhana/bombers-server/internal/svc"
@@ -375,12 +376,15 @@ func buildAndServe() (*app, error) {
 	authService := auth.NewService(issuer, pool)
 	authHandler := auth.NewHandler(authService)
 	usersHandler := users.NewHandler(pool, authService)
-	// Discord is the only way in.
-	discordHandler := users.NewDiscordHandler(pool, authService, cfg)
-	if discordHandler.Configured() {
-		logx.Info("discord sign-in ready (signups: %s)", cfg.SignupMode)
+	// Discord is the only way in. Its configuration is operator-changeable at
+	// runtime (internal/settings), so this only reports the state at boot — the
+	// handler reads it fresh on every sign-in.
+	settingsStore := settings.New(pool)
+	discordHandler := users.NewDiscordHandler(pool, authService, settingsStore)
+	if discordHandler.Configured(ctx) {
+		logx.Info("discord sign-in ready (signups: %s)", settingsStore.Get(ctx, settings.SignupMode))
 	} else {
-		logx.Warn("discord sign-in is NOT configured — set DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URL; nobody new can sign in")
+		logx.Warn("discord sign-in is NOT configured — nobody can sign in. Set it from the console: `discord set <client-id> <secret> <redirect-url>`")
 	}
 	friendsHandler := friends.NewHandler(pool)
 	profilesHandler := profiles.NewHandler(pool)
