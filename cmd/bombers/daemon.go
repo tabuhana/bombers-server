@@ -197,3 +197,32 @@ func runLogs(args []string) {
 	}
 	fmt.Println(strings.Join(lines, "\n"))
 }
+
+// runRestart stops the background server and starts it again.
+//
+// It exists because there was no obvious command for the thing you do most —
+// after `bombers update`, the new binary is on disk and the old one is still
+// serving. `bombers service restart` LOOKS like the answer and isn't: it talks to
+// systemd, so on an install that runs with `bombers start` it asks for a root
+// password and then fails to restart a unit that was never registered.
+//
+// Stopping when nothing is running is not an error. "Make it run the current
+// build" is the intent, and a stopped server satisfies half of it already.
+func runRestart(args []string) {
+	logx.Init()
+
+	pidPath, _, err := runtimePaths()
+	if err != nil {
+		logx.Fatal("restart: %v", err)
+	}
+
+	if pid := runningPid(pidPath); pid != 0 {
+		runStop(nil)
+	} else {
+		logx.Info("nothing was running — starting")
+	}
+
+	// runStop only returns once the process is gone (or after warning that it
+	// hasn't gone), so the port is free by the time start binds it.
+	runStart(args)
+}

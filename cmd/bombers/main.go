@@ -118,6 +118,8 @@ func main() {
 		runInstall(rest)
 	case "stop":
 		runStop(rest)
+	case "restart":
+		runRestart(rest)
 	case "status":
 		runStatusCmd(rest)
 	case "logs":
@@ -152,6 +154,7 @@ Commands:
   install    Build + put bombers on your PATH. Run once, from your checkout
   start      Run the server in the background
   stop       Stop the background server
+  restart    Stop it and start it again — what you want after an update
   status     Is the background server running, and where are its logs
   logs       Print the tail of the background server's log (logs [lines])
   setup      Configure the database + media and migrate — re-run any time to change it
@@ -1360,6 +1363,13 @@ func runConsole(_ []string) {
 	// process uptime here). Ignore the returned bool: stop/exit/quit all just leave
 	// the console — none of them can stop the separately-running server.
 	console.New(pool, storage, time.Time{}, cfg.Host, cfg.Port).Run()
+
+	// Put the terminal back how we found it. Entering cleared the screen to show
+	// the banner, so leaving it behind — a full-screen logo above whatever you do
+	// next — is half a transition.
+	if logx.Interactive() {
+		clearScreen(os.Stdout)
+	}
 }
 
 func healthHandler(pool *pgxpool.Pool, storage media.Store) http.HandlerFunc {

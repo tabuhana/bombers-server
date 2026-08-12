@@ -134,6 +134,7 @@ and nobody has to re-enter anything.
 | `bombers setup` | The config wizard, then migrate. Re-run to reconfigure |
 | `bombers start` | Run in the background (`--foreground` to stay attached, `--headless` for no console) |
 | `bombers stop` | Stop the background server |
+| `bombers restart` | Stop it and start it again — the command to use after `bombers update` |
 | `bombers status` | Is it running, and where are its logs |
 | `bombers logs [lines]` | Tail the background server's log |
 | `bombers update` | After a `git pull`: rebuild and migrate. Does not serve |
@@ -167,8 +168,10 @@ Also: `service stop | restart | status | uninstall`. Run `bombers setup` first �
 a service has no terminal to answer the wizard on, so it refuses to start with an
 incomplete config.
 
-Once it's a service, the routine after a `git pull` is `bombers update` (rebuild
-and migrate) followed by a `service restart`.
+After a `git pull` the routine is `bombers update` (rebuild and migrate) then
+`bombers restart`. Use `bombers service restart` **only** if you actually
+registered a systemd unit — it talks to systemd, so otherwise it asks for a root
+password and then fails to restart something that was never registered.
 
 `bombers uninstall` is the full teardown: it deregisters the service, then —
 after a confirmation, or `--yes` for scripts — deletes the entire data directory

@@ -97,6 +97,7 @@ never mentions Go or goose:**
 ./bombers install    # once, from a fresh clone: builds + puts `bombers` on your PATH
 bombers setup        # configure database + media, and migrate. Re-run to change config
 bombers start        # run in the background
+bombers restart      # stop + start; the command to use after `bombers update`
 bombers              # the admin console against it (exiting leaves it running)
 bombers stop         # stop it
 ```
