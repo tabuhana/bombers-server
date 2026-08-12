@@ -49,10 +49,40 @@ func Control(s service.Service, action string) error {
 	if action == "status" {
 		return status(s)
 	}
+	// Ask whether a service exists BEFORE handing the request to the service
+	// manager. systemctl asks for a root password first and mentions the missing
+	// unit second, so an operator who runs the server with `bombers start` gets
+	// prompted, authenticates, and then watches it fail — for a unit nobody
+	// registered. Answering here costs one unprivileged query.
+	if action != "install" {
+		if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+			return notInstalled(action)
+		}
+	}
 	if err := service.Control(s, action); err != nil {
 		return friendly(action, err)
 	}
 	return nil
+}
+
+// notInstalled explains that there is no service, and names the command that
+// does what was being asked for. The plain equivalents are spelled out because
+// this is precisely the confusion that produces the mistake: `bombers restart`
+// and `bombers service restart` read as the same thing and are not.
+func notInstalled(action string) error {
+	instead := map[string]string{
+		"start":   "bombers start",
+		"stop":    "bombers stop",
+		"restart": "bombers restart",
+	}[action]
+
+	if instead == "" {
+		return fmt.Errorf("no OS service is installed, so there is nothing to %s", action)
+	}
+	return fmt.Errorf("no OS service is installed, so there is nothing to %s.\n"+
+		"       To %s the server you run with `bombers start`:  %s\n"+
+		"       To register a service instead:                  sudo bombers service install",
+		action, action, instead)
 }
 
 // status prints the installed/running state in plain words. A not-installed

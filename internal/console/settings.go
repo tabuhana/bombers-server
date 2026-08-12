@@ -142,7 +142,7 @@ func runDiscord(ctx context.Context, c *Console, args []string) error {
 		}
 	}
 
-	fmt.Fprintln(c.out, "  Discord application saved. Sign-in works from the next attempt.")
+	fmt.Fprintln(c.out, "  Discord application saved — sign-in works now, no restart needed.")
 	fmt.Fprintf(c.out, "    redirect  %s\n", args[3])
 	fmt.Fprintln(c.out, "  ! that redirect must be registered on the Discord application EXACTLY,")
 	fmt.Fprintln(c.out, "    at discord.com/developers → your app → OAuth2 → Redirects.")
