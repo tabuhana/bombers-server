@@ -169,9 +169,17 @@ func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 // Unauthenticated on purpose: it's a constant, and a UI needs it before it has
 // anywhere to put a token.
 func (h *Handler) Scopes(w http.ResponseWriter, r *http.Request) {
-	out := make([]map[string]string, 0, len(All))
+	out := make([]map[string]any, 0, len(All))
 	for _, s := range All {
-		out = append(out, map[string]string{"scope": string(s), "describes": describe(s)})
+		out = append(out, map[string]any{
+			"scope":     string(s),
+			"describes": describe(s),
+			// So a client can hide (or mark) what this user could never use.
+			// The list itself stays a constant — the endpoint is
+			// unauthenticated and doesn't know who's asking — and the client
+			// already knows whether its user is an admin.
+			"requires_admin": RequiresAdmin(s),
+		})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"scopes": out})
 }

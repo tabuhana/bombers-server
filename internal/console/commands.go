@@ -52,6 +52,8 @@ func builtins() []command {
 		{name: "packs", help: "list published look-and-feel packs", run: runPacks},
 		{name: "publish-pack", help: "publish-pack <folder> — publish a theme/sound pack (pack.json + sounds/ + wallpaper)", run: runPublishPack},
 		{name: "unpublish-pack", help: "unpublish-pack <id> — remove a pack and its assets", run: runUnpublishPack},
+		{name: "releases", help: "list published app releases (→ marks the one clients are offered)", run: runReleases},
+		{name: "unpublish-release", help: "unpublish-release <version> — pull a bad build; clients fall back to the previous one", run: runUnpublishRelease},
 		{name: "stop", aliases: []string{"quit", "exit"}, help: "gracefully shut the server down", run: runStop},
 	}
 }

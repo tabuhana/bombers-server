@@ -59,6 +59,17 @@ const (
 	StoreWrite Scope = "store:write"
 )
 
+// RequiresAdmin reports that holding this scope is not enough on its own — the
+// account behind the token must also be an admin.
+//
+// It exists so a client can say so BEFORE someone picks it. A scope is a
+// ceiling, not a grant, which means a normal user can be given `store:write`
+// quite legitimately and still publish nothing; without this, the only way to
+// find that out is to be refused by a route.
+func RequiresAdmin(s Scope) bool {
+	return s == StoreWrite
+}
+
 // All is every grantable scope, in the order a UI should offer them: least
 // alarming first.
 var All = []Scope{

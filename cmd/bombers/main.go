@@ -41,6 +41,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/nodeshare"
 	"github.com/tabuhana/bombers-server/internal/packs"
 	"github.com/tabuhana/bombers-server/internal/profiles"
+	"github.com/tabuhana/bombers-server/internal/releases"
 	"github.com/tabuhana/bombers-server/internal/rooms"
 	"github.com/tabuhana/bombers-server/internal/settings"
 	"github.com/tabuhana/bombers-server/internal/setup"
@@ -399,6 +400,7 @@ func buildAndServe() (*app, error) {
 	roomsHandler := rooms.NewHandler(pool, issuer)
 	activitiesHandler := activities.NewHandler(pool, storage)
 	packsHandler := packs.NewHandler(pool, storage)
+	releasesHandler := releases.NewHandler(pool, storage)
 	tokensHandler := apitokens.NewHandler(pool)
 	// RequireAuth now accepts an API token as well as a session JWT. Wired here
 	// rather than imported by `auth`, so the dependency points one way.
@@ -448,6 +450,12 @@ func buildAndServe() (*app, error) {
 			r.Get("/packs", packsHandler.List)
 			r.Get("/packs/{id}/bundle", packsHandler.Download)
 			r.Get("/packs/{id}/assets/*", packsHandler.Asset)
+			// The app's own updates. On the same shelf as everything else you
+			// install from here — the difference is only that the thing being
+			// installed is Bombers. `latest` answers 204 for a client that's
+			// current, which is nearly every call it ever makes.
+			r.Get("/releases/latest", releasesHandler.Latest)
+			r.Get("/releases/{version}/download", releasesHandler.Download)
 		})
 		// Token scope: writing published items.
 		r.Group(func(r chi.Router) {
@@ -520,6 +528,7 @@ func buildAndServe() (*app, error) {
 		// over HTTP, so an operator can publish from the client. Its own
 		// sub-router so RequireAdmin gates ONLY these two routes.
 		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
 			r.Post("/nodes", nodesHandler.Publish)
 			r.Delete("/nodes/{id}", nodesHandler.Unpublish)
@@ -543,6 +552,7 @@ func buildAndServe() (*app, error) {
 		// of needing a shell on the box. Two steps like the pack store, because a
 		// game carries binary assets: the bundle first, then one PUT per file.
 		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
 			r.Post("/activities", activitiesHandler.Publish)
 			r.Put("/activities/{id}/assets/*", activitiesHandler.PublishAsset)
@@ -555,10 +565,23 @@ func buildAndServe() (*app, error) {
 		// TWO steps where the node store took one, because a pack carries binary
 		// assets: pack.json first, then one raw-bytes PUT per sound/wallpaper.
 		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
 			r.Post("/packs", packsHandler.Publish)
 			r.Put("/packs/{id}/assets/*", packsHandler.PublishAsset)
 			r.Delete("/packs/{id}", packsHandler.Unpublish)
+		})
+		// App releases. Two steps like the pack and game stores, because an
+		// installer is binary: declare the version (with the signature the build
+		// produced), then send the file. HTTP-only on purpose — the build happens
+		// on the operator's Windows desktop and the server runs on Linux, so a
+		// console command would mean copying eighty megabytes onto the box first.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
+			r.Use(admin.RequireAdmin(pool))
+			r.Post("/releases", releasesHandler.Publish)
+			r.Put("/releases/{version}/artifact", releasesHandler.PublishArtifact)
+			r.Delete("/releases/{version}", releasesHandler.Unpublish)
 		})
 	})
 
