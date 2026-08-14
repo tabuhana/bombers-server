@@ -40,6 +40,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/nodes"
 	"github.com/tabuhana/bombers-server/internal/nodeshare"
 	"github.com/tabuhana/bombers-server/internal/packs"
+	"github.com/tabuhana/bombers-server/internal/presence"
 	"github.com/tabuhana/bombers-server/internal/profiles"
 	"github.com/tabuhana/bombers-server/internal/releases"
 	"github.com/tabuhana/bombers-server/internal/rooms"
@@ -401,6 +402,7 @@ func buildAndServe() (*app, error) {
 	activitiesHandler := activities.NewHandler(pool, storage)
 	packsHandler := packs.NewHandler(pool, storage)
 	releasesHandler := releases.NewHandler(pool, storage)
+	presenceHandler := presence.NewHandler(pool)
 	tokensHandler := apitokens.NewHandler(pool)
 	// RequireAuth now accepts an API token as well as a session JWT. Wired here
 	// rather than imported by `auth`, so the dependency points one way.
@@ -499,6 +501,9 @@ func buildAndServe() (*app, error) {
 			r.Get("/friends", friendsHandler.List)
 			r.Get("/friends/code", friendsHandler.MyCode)
 			r.Get("/friends/requests", friendsHandler.ListRequests)
+			// Who's around. Friends only — there is no way to ask about a
+			// stranger, the same reason there's no username search.
+			r.Get("/presence", presenceHandler.ListFriends)
 		})
 		// Managing API tokens is SESSION-ONLY: a token must never be able to
 		// mint another token or revoke its own revocation. There is no scope
@@ -517,6 +522,9 @@ func buildAndServe() (*app, error) {
 		r.Post("/friends/{userID}/block", friendsHandler.Block)
 		r.Post("/friends/{userID}/unblock", friendsHandler.Unblock)
 		r.Put("/me/profile", profilesHandler.UpdateMine)
+		// Your status AND your heartbeat, in one write: two calls that must
+		// agree are two calls that can disagree.
+		r.Put("/me/presence", presenceHandler.SetMine)
 		// Your notes, already narrowed to each reader. The client works out who
 		// should see what — its own relationship groups, its own per-note
 		// exceptions — and publishes one blob per friend; the server stores them
