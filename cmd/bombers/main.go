@@ -483,8 +483,12 @@ func buildAndServe() (*app, error) {
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.PeopleRead))
 			r.Get("/me/profile", profilesHandler.GetMine)
-			r.Get("/me/profile/shares", profilesHandler.GetMyShares)
 			r.Get("/profiles/{userID}", profilesHandler.GetForUser)
+			// The notes half of a person card, as that owner published it FOR
+			// YOU. Friend-gated, and every refusal is the same opaque 404 —
+			// "they shared nothing with me" must not be distinguishable from
+			// "they shared plenty, none of it with me".
+			r.Get("/cards/{ownerID}", profilesHandler.GetCardFrom)
 			r.Get("/me/about", profilesHandler.ListMyAbout)
 			r.Get("/me/about/{subjectID}", profilesHandler.GetMyAbout)
 			r.Get("/about/{authorID}", profilesHandler.GetSharedAbout)
@@ -513,9 +517,12 @@ func buildAndServe() (*app, error) {
 		r.Post("/friends/{userID}/block", friendsHandler.Block)
 		r.Post("/friends/{userID}/unblock", friendsHandler.Unblock)
 		r.Put("/me/profile", profilesHandler.UpdateMine)
-		// Per-field sharing: the client resolves its own relationship groups to
-		// friend ids and publishes the result; the server never sees a group.
-		r.Put("/me/profile/shares", profilesHandler.PutMyShares)
+		// Your notes, already narrowed to each reader. The client works out who
+		// should see what — its own relationship groups, its own per-note
+		// exceptions — and publishes one blob per friend; the server stores them
+		// opaquely and hands out whichever belongs to the reader. A publish
+		// REPLACES the whole set, so unsharing is a row that stops existing.
+		r.Put("/me/card", profilesHandler.PutMyCard)
 		r.Put("/me/about/{subjectID}", profilesHandler.UpsertMyAbout)
 		r.Delete("/me/about/{subjectID}", profilesHandler.DeleteMyAbout)
 		// Static /messages/unread is registered before the /messages/{userID}
