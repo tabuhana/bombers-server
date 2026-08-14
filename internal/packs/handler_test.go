@@ -41,6 +41,18 @@ func (s *recordingStore) RemovePrefix(_ context.Context, prefix string) error {
 	return nil
 }
 
+// Recording, like the rest: what was PUT is the only thing this fake ever
+// knew about, so that's what it can list.
+func (s *recordingStore) ListObjects(_ context.Context, prefix string) ([]string, error) {
+	var keys []string
+	for _, k := range s.puts {
+		if prefix == "" || strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
+}
+
 func (s *recordingStore) Put(_ context.Context, userID, kind string, _ []byte, _ string) error {
 	s.puts = append(s.puts, userID+"/"+kind)
 	return nil

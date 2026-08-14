@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,6 +187,35 @@ func (s *FSStore) GetObject(_ context.Context, key string) (io.ReadCloser, error
 }
 
 // RemovePrefix deletes everything under a key prefix (an activity's assets).
+// ListObjects walks the media directory and returns every key under a prefix,
+// in the same slash-separated form the S3 store uses — a caller must not be
+// able to tell which backend it got. Backup only; nothing in the serving path
+// lists.
+func (s *FSStore) ListObjects(_ context.Context, prefix string) ([]string, error) {
+	var keys []string
+	err := filepath.WalkDir(s.dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(s.dir, path)
+		if rerr != nil {
+			return rerr
+		}
+		key := filepath.ToSlash(rel)
+		if prefix == "" || strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list objects: %w", err)
+	}
+	return keys, nil
+}
+
 func (s *FSStore) RemovePrefix(_ context.Context, prefix string) error {
 	target, err := s.objectPath(prefix)
 	if err != nil {

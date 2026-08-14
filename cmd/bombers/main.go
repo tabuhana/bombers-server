@@ -130,6 +130,10 @@ func main() {
 		runConsole(rest)
 	case "service":
 		runService(s, rest)
+	case "backup":
+		runBackup(rest)
+	case "restore":
+		runRestore(rest)
 	case "uninstall":
 		runUninstall(s, rest)
 	default:
@@ -163,6 +167,8 @@ Commands:
   doctor     Check the local setup for problems
   update     After a git pull: rebuild and migrate — does not serve
   console    Open the admin console against a running server (users, status, node store)
+  backup     Write everything to one portable file (database + media)
+  restore    Put a backup file back — REPLACES what's on this server
   service    Manage the OS background service (see actions below)
   uninstall  Remove the OS service and delete the local data directory
   version    Print the version and exit

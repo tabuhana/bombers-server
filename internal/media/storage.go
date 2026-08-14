@@ -41,6 +41,9 @@ type Store interface {
 	PutObject(ctx context.Context, key string, data []byte, contentType string) error
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 	RemovePrefix(ctx context.Context, prefix string) error
+	// ListObjects enumerates keys under a prefix. Backup only — nothing in the
+	// serving path lists, because every read there is by exact key.
+	ListObjects(ctx context.Context, prefix string) ([]string, error)
 }
 
 // Storage is the thin S3 wrapper the handlers use. It speaks the plain S3 API
@@ -127,6 +130,22 @@ func (s *Storage) RemovePrefix(ctx context.Context, prefix string) error {
 		}
 	}
 	return nil
+}
+
+// ListObjects returns every key under a prefix (pass "" for the whole bucket).
+//
+// Only backup needs this, and it needs it for the obvious reason: you cannot
+// copy what you cannot enumerate. Nothing in the serving path lists — every
+// read here is by exact key — so this stays out of the hot path entirely.
+func (s *Storage) ListObjects(ctx context.Context, prefix string) ([]string, error) {
+	var keys []string
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if obj.Err != nil {
+			return nil, fmt.Errorf("list objects: %w", obj.Err)
+		}
+		keys = append(keys, obj.Key)
+	}
+	return keys, nil
 }
 
 // Put writes (or overwrites) the object for a user's media kind.

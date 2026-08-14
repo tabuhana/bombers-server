@@ -103,6 +103,8 @@ bombers start        # run in the background
 bombers restart      # stop + start; the command to use after `bombers update`
 bombers              # the admin console against it (exiting leaves it running)
 bombers stop         # stop it
+bombers backup       # everything in one portable file
+bombers restore FILE # put it back (REPLACES what's there)
 ```
 
 `./bombers` in the repo root is a **launcher script**: it compiles the server if
@@ -130,6 +132,18 @@ no `go build`. After `install`, it's out of the picture.
   otherwise systemd would start a console instead of a server.
 - `service` (systemd/launchd/Windows Service) remains for start-on-boot and
   restart-on-failure; it is no longer needed just to run in the background.
+
+- **`backup` / `restore`** — one portable file, and portable is the point: a
+  backup that only restores onto an identical setup isn't a backup. The archive
+  holds a plain `pg_dump` plus the media as ordinary files, so it goes back into
+  whatever the NEW machine runs — laptop's embedded Postgres to a VPS's system
+  one, filesystem media to MinIO. `pg_dump`/`psql` are borrowed from the
+  embedded distribution when there is one (`<dataDir>/pg/runtime/bin`) and from
+  PATH otherwise; shelling out rather than serialising rows here is a deliberate
+  refusal to be clever, since a hand-rolled dumper that gets one escaping rule
+  wrong produces an archive that looks fine and restores wrong. `restore`
+  REPLACES everything, makes you type RESTORE, and refuses outright when stdin
+  isn't a terminal (the `deluser` rule).
 
 Underneath, the plumbing commands still exist: `migrate`, `doctor`, `console`,
 `version`, `uninstall`. `migrate` works on BOTH backends — with embedded
