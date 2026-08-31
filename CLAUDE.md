@@ -119,8 +119,12 @@ no `go build`. After `install`, it's out of the picture.
   separate so reconfiguring never means reinstalling.
 - **`setup`** — the config wizard, then migrates (it now knows where the database
   is). This is the only migration a first install needs.
-- **`update`** — after a `git pull`: rebuilds from the recorded source, replaces
-  the installed binary, then runs the NEW binary's `migrate` as a child process.
+- **`update`** — pulls the recorded source, rebuilds from it, replaces the
+  installed binary, then applies migrations. It PULLS so that "I updated and
+  nothing changed" stops being a normal experience, and REFUSES on a dirty tree
+  rather than stashing: a binary built from code that exists nowhere else is one
+  nobody can reproduce. Not a git checkout, or no git installed → it says so and
+  builds what's there.
   That handoff is required, not decoration: migrations are embedded in the
   binary, so the running copy has no idea a new one exists.
 - **`start`** backgrounds itself at a terminal (pidfile + `server.log` in the data

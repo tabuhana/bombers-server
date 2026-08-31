@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -14,8 +18,8 @@ import (
 	"github.com/tabuhana/bombers-server/internal/setup"
 )
 
-// `bombers update` — bring the database up to date with the code you just built,
-// then get out of the way.
+// `bombers update` — fetch the new code, build it, bring the database up to
+// date, then get out of the way.
 //
 // It does NOT serve and it does NOT open the admin console. Updating and running
 // are separate acts: this brings up only what it needs, migrates, puts it back
@@ -44,6 +48,17 @@ func runUpdate(_ []string) {
 	// installed copy that hadn't updated yet. There is no such command now, and
 	// nothing to keep in step.
 	if rec, rerr := loadInstallRecord(); rerr == nil {
+		// Pull first. `update` used to rebuild whatever happened to be in the
+		// checkout, which made "I updated and nothing changed" a normal
+		// experience — the code you meant to run was still on the remote.
+		//
+		// It refuses on a dirty tree rather than stashing or forcing: local
+		// changes on a server are either something you're mid-way through or
+		// something you forgot, and neither is improved by a command throwing
+		// them away to save you a step.
+		if err := pullSource(rec.Source); err != nil {
+			logx.Fatal("update: %v", err)
+		}
 		if err := buildInto(rec.Source, rec.Binary); err != nil {
 			logx.Fatal("update: %v", err)
 		}
@@ -125,4 +140,44 @@ func loadEnvAndConfig() {
 			fc.Apply()
 		}
 	}
+}
+
+// pullSource brings the recorded checkout up to date with its remote.
+//
+// Skipped silently when the source isn't a git checkout at all — somebody may
+// have unpacked a tarball, and "you didn't clone this" is not a reason to
+// refuse to rebuild it.
+func pullSource(source string) error {
+	if _, err := os.Stat(filepath.Join(source, ".git")); err != nil {
+		logx.Info("update: %s isn't a git checkout — building what's there", source)
+		return nil
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		logx.Warn("update: git isn't installed — building what's already in %s", source)
+		return nil
+	}
+
+	// A dirty tree stops the update. Building it would work; the problem is
+	// that the binary would then be from code that exists nowhere else, and
+	// nobody would know until they tried to reproduce it.
+	dirty := exec.Command("git", "status", "--porcelain")
+	dirty.Dir = source
+	out, err := dirty.Output()
+	if err != nil {
+		return fmt.Errorf("checking %s for local changes: %w", source, err)
+	}
+	if len(strings.TrimSpace(string(out))) > 0 {
+		return fmt.Errorf("%s has uncommitted changes — commit, stash or discard them first:\n%s", source, strings.TrimSpace(string(out)))
+	}
+
+	pull := exec.Command("git", "pull", "--ff-only")
+	pull.Dir = source
+	pull.Stdout, pull.Stderr = os.Stdout, os.Stderr
+	logx.Info("update: pulling %s", source)
+	if err := pull.Run(); err != nil {
+		// --ff-only, so this is a real divergence rather than a merge waiting to
+		// be resolved. Say so plainly instead of leaving a half-merged checkout.
+		return fmt.Errorf("git pull failed — the checkout has diverged from its remote and needs a look: %w", err)
+	}
+	return nil
 }
