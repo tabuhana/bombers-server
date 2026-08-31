@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/kardianos/service"
@@ -24,12 +25,68 @@ import (
 // are set: the SCM launches the binary with the same command line and the
 // dispatcher hands an SCM-launched process to s.Run() (it is non-Interactive),
 // so the service needs no marker flag to know it is a service.
-func Config() *service.Config {
+//
+// `user` becomes the account the service RUNS AS, and it is the whole reason
+// this takes an argument. Installing a service needs root, so without it
+// systemd would run the server as root too — and the server cannot work as
+// root: the embedded Postgres refuses outright (initdb will not create a data
+// directory owned by root), and the data directory would resolve to root's home
+// rather than to the account that has been holding it all along.
+//
+// Empty means "whatever the service manager defaults to", which is correct on
+// Windows and on a machine where the server genuinely runs as the installing
+// user.
+func Config(user string) *service.Config {
 	return &service.Config{
 		Name:        "BombersServer",
 		DisplayName: "Bombers Server",
 		Description: "Bombers notebook server — runs the local self-host backend in the background.",
+		UserName:    user,
 	}
+}
+
+// ServiceUser works out which account an installed service should run as.
+//
+// `flag` is an explicit --user; otherwise SUDO_USER, which is set when a normal
+// user reaches root through sudo and is therefore exactly the account that owns
+// the install. Falls back to the current user.
+func ServiceUser(flag string) string {
+	if strings.TrimSpace(flag) != "" {
+		return strings.TrimSpace(flag)
+	}
+	if sudo := strings.TrimSpace(os.Getenv("SUDO_USER")); sudo != "" {
+		return sudo
+	}
+	if u := strings.TrimSpace(os.Getenv("USER")); u != "" {
+		return u
+	}
+	return strings.TrimSpace(os.Getenv("LOGNAME"))
+}
+
+// wouldRunAsRoot is the rule on its own, split out from the OS guard so it can
+// be tested anywhere. The dev machine is Windows and the server is Linux, so a
+// check that only runs on Linux is a check that never runs.
+func wouldRunAsRoot(user string) bool {
+	return user == "" || user == "root"
+}
+
+// CheckServiceUser refuses to register a service that would run as root.
+//
+// It is a refusal rather than a warning because the failure is invisible until
+// the machine reboots: the install succeeds, the unit file looks right, and the
+// server then fails to start weeks later for reasons nobody connects back to
+// this command. Better to stop now and say which account it should be.
+func CheckServiceUser(user string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if wouldRunAsRoot(user) {
+		return fmt.Errorf("refusing to install a service that runs as root — the embedded Postgres will not start as root, " +
+			"and the data directory would be root's rather than the account holding it.\n" +
+			"    Name the account that owns the install:  bombers service install --user <name>\n" +
+			"    (or reach root with sudo, which passes it along automatically)")
+	}
+	return nil
 }
 
 // Interactive reports whether the process is running in an interactive session

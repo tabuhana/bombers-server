@@ -136,6 +136,13 @@ no `go build`. After `install`, it's out of the picture.
   otherwise systemd would start a console instead of a server.
 - `service` (systemd/launchd/Windows Service) remains for start-on-boot and
   restart-on-failure; it is no longer needed just to run in the background.
+  **`service install` sets the unit's user** (`svc.Config(user)` → `User=`),
+  taken from `--user` or `SUDO_USER`, and **REFUSES to install a root-run
+  service**. Installing needs root, so without this systemd would run the server
+  as root — where the embedded Postgres refuses to start (`initdb: cannot be run
+  as root`) and the data dir resolves to root's home instead of the account
+  holding it. The failure would be invisible until the first reboot, which is
+  why it's a refusal rather than a warning.
 
 - **`backup` / `restore`** — one portable file, and portable is the point: a
   backup that only restores onto an identical setup isn't a backup. The archive

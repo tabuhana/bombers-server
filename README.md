@@ -160,9 +160,16 @@ start the server; that stays a separate act. Start it again with `bombers start`
 systemd service when you want start-on-boot and restart-on-failure:
 
 ```bash
-sudo bombers service install
+sudo bombers service install       # runs as YOU, not root — see below
 bombers service start
 ```
+
+The service runs as the account that owns the install, not as root. Reaching
+root with `sudo` passes that along automatically; if you got there another way,
+name it: `bombers service install --user <name>`. It REFUSES to register a
+root-run service rather than creating one that can't work — the embedded
+Postgres will not start as root, and the data directory would be root's rather
+than the one holding everything.
 
 Also: `service stop | restart | status | uninstall`. Run `bombers setup` first —
 a service has no terminal to answer the wizard on, so it refuses to start with an

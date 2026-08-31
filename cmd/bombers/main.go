@@ -89,7 +89,7 @@ func main() {
 	// it is cheap and permission-free — only install/uninstall/start/stop/status
 	// actually touch the service manager.
 	prg := newProgram()
-	s, serr := service.New(prg, svc.Config())
+	s, serr := service.New(prg, svc.Config(""))
 	if serr != nil {
 		logx.Init()
 		logx.Fatal("configuring OS service: %v", serr)
@@ -839,6 +839,26 @@ func runService(s service.Service, args []string) {
 		fmt.Fprintln(os.Stderr, "valid actions: install, start, stop, restart, status, uninstall")
 		os.Exit(2)
 	}
+
+	// INSTALL is the only action that writes the unit, so it is the only one
+	// that decides which account the server runs as. Rebuild the handle with
+	// that user rather than the empty one built at startup: a service running
+	// as root looks fine today and fails at the first reboot, because the
+	// embedded Postgres refuses to start as root and the data directory would
+	// be root's rather than the one holding everything.
+	if action == "install" {
+		user := svc.ServiceUser(flagValue(args, "--user"))
+		if err := svc.CheckServiceUser(user); err != nil {
+			logx.Fatal("%v", err)
+		}
+		withUser, uerr := service.New(newProgram(), svc.Config(user))
+		if uerr != nil {
+			logx.Fatal("configuring OS service: %v", uerr)
+		}
+		s = withUser
+		logx.Info("service will run as %s", user)
+	}
+
 	if err := svc.Control(s, action); err != nil {
 		logx.Fatal("%v", err)
 	}
@@ -1444,4 +1464,19 @@ func healthHandler(pool *pgxpool.Pool, storage media.Store) http.HandlerFunc {
 // ever called when stdout is a real terminal, so piped output stays clean.
 func clearScreen(w io.Writer) {
 	fmt.Fprint(w, "\x1b[2J\x1b[H")
+}
+
+// flagValue reads `--name value` or `--name=value` out of a small argument
+// list. The service subcommands take one option between them, so this is a
+// dozen lines rather than a flag.FlagSet per action.
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, name+"=") {
+			return strings.TrimPrefix(a, name+"=")
+		}
+	}
+	return ""
 }
