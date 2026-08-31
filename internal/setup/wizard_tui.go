@@ -55,8 +55,8 @@ func tuiReachability(fc *FileConfig, _ string) error {
 			Title("Where are you running this?").
 			Description("Either way it's private — people need the address you give them.").
 			Options(
-				huh.NewOption("A computer on my network", reachNetwork),
-				huh.NewOption("A server with a domain name", reachDomain),
+				huh.NewOption("Local network only — a machine on your LAN", reachNetwork),
+				huh.NewOption("The internet — reached at a domain name", reachDomain),
 			).
 			Value(&choice),
 	); err != nil {

@@ -328,8 +328,8 @@ func domainWarning(domain string) string {
 func askReachability(r *bufio.Reader, fc *FileConfig) {
 	fmt.Println()
 	fmt.Println("Where are you running this?")
-	fmt.Println("  1) A computer on my network")
-	fmt.Println("  2) A server with a domain name")
+	fmt.Println("  1) Local network only — a machine on your LAN")
+	fmt.Println("  2) The internet — reached at a domain name")
 	def := "1"
 	if reachOf(fc) == reachDomain {
 		def = "2"
@@ -344,9 +344,10 @@ func askReachability(r *bufio.Reader, fc *FileConfig) {
 		return
 	}
 	fmt.Println()
-	fmt.Println("  The domain has to point at this machine before HTTPS can work —")
-	fmt.Println("  an A record aimed at its IP. That DNS entry IS the proof of")
-	fmt.Println("  ownership the certificate authority checks.")
+	fmt.Println("  It doesn't have to exist yet — you can set the DNS up after.")
+	fmt.Println("  HTTPS starts working once an A record points it at this machine;")
+	fmt.Println("  that DNS entry is the proof of ownership the certificate")
+	fmt.Println("  authority checks.")
 	applyReachability(fc, reachDomain, ask(r, "Domain", fc.Domain, exampleDomain))
 	if w := domainWarning(fc.Domain); w != "" {
 		fmt.Println("  ! Note: " + w)
