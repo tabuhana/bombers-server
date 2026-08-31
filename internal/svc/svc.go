@@ -42,6 +42,16 @@ func Config(user string) *service.Config {
 		DisplayName: "Bombers Server",
 		Description: "Bombers notebook server — runs the local self-host backend in the background.",
 		UserName:    user,
+		// Come back from a failed start rather than staying down.
+		//
+		// The cause is usually transient and self-clearing: a database port
+		// still held by something shutting down, a disk not mounted yet at
+		// boot. `on-failure` rather than `always` so a deliberate stop stays
+		// stopped — otherwise `service stop` would be a thing you can't do.
+		Option: service.KeyValue{
+			"Restart":    "on-failure",
+			"RestartSec": 10,
+		},
 	}
 }
 

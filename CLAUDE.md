@@ -141,6 +141,13 @@ no `go build`. After `install`, it's out of the picture.
   backgrounds itself and so writes no pidfile. Without that check, `update`'s
   stale-port cleanup reads a LIVE database as a crash leftover and stops it,
   killing the database out from under the running server.
+  A service whose **startup fails now EXITS non-zero** instead of asking the
+  service manager to stop it: `s.Stop()` under systemd means `systemctl stop`,
+  which the service's own unprivileged user may not do — so the call failed, the
+  error was discarded, and the process sat there alive serving nothing while
+  systemd reported it running. The unit carries `Restart=on-failure` (not
+  `always`, so a deliberate stop stays stopped) with a 10s delay, which lets a
+  transient cause like a port still held by something shutting down clear itself.
   **`service install` sets the unit's user** (`svc.Config(user)` → `User=`),
   taken from `--user` or `SUDO_USER`, and **REFUSES to install a root-run
   service**. Installing needs root, so without this systemd would run the server

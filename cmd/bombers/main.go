@@ -791,11 +791,20 @@ func (p *program) run(s service.Service) {
 	if err != nil {
 		logx.Error("startup failed: %v", err)
 		close(p.done)
-		// Nothing is serving — ask the OS service manager to transition us to
-		// stopped (best effort). This drives Stop, whose done-channel guard makes
-		// the extra call harmless.
-		_ = s.Stop()
-		return
+		// EXIT, rather than asking the service manager to stop us.
+		//
+		// It used to call s.Stop(), which under systemd means `systemctl stop`
+		// — a privileged operation the service's own unprivileged user is not
+		// allowed to perform. The call failed, the error was discarded, and the
+		// process sat there alive and serving nothing while systemd reported it
+		// as running perfectly. A failure that reports success is worse than a
+		// crash.
+		//
+		// Dying with a non-zero status is the thing a service manager actually
+		// understands: it marks the unit failed, and Restart=on-failure gives a
+		// transient cause (a port still held by something shutting down) a
+		// chance to clear on its own.
+		os.Exit(1)
 	}
 
 	<-p.stop
