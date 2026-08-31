@@ -245,6 +245,26 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Old releases are dead weight: nothing points at them, and their installers
+	// sit in object storage forever. Prune after the new one lands, so a failure
+	// here can never be what loses you the release you just published.
+	//
+	// Deliberately not fatal. The publish SUCCEEDED — refusing it because the
+	// tidying failed would be the tail wagging the dog, and the next publish
+	// prunes again anyway.
+	if gone, perr := PruneOld(r.Context(), h.pool, KeepReleases); perr != nil {
+		logx.Error("releases: prune: %v", perr)
+	} else {
+		for _, old := range gone {
+			if h.storage != nil {
+				if derr := h.storage.RemovePrefix(r.Context(), "releases/"+old.Version+"/"); derr != nil {
+					logx.Error("releases: remove pruned artifact %s: %v", old.Version, derr)
+				}
+			}
+			logx.Info("releases: pruned %s (keeping the newest %d)", old.Version, KeepReleases)
+		}
+	}
+
 	logx.Info("releases: declared %s (%s)", req.Version, req.Artifact)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"version":      req.Version,

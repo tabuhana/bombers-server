@@ -204,6 +204,57 @@ func List(ctx context.Context, pool *pgxpool.Pool) ([]Record, error) {
 	return out, rows.Err()
 }
 
+// KeepReleases is how many releases survive a publish.
+//
+// Not one, because `unpublish-release` is the fast rollback: pulling a bad build
+// drops clients onto the newest release STILL published, and that only works if
+// a previous one is there. Delete aggressively and you delete your undo.
+//
+// Not unbounded either, which is what it was — at 2.0.1, 1.0.0 was still sitting
+// in object storage with nothing pointing at it. Three gives two rollback steps
+// and stops the disk growing forever.
+const KeepReleases = 3
+
+// pruneSQL removes everything past the newest `keep` by publish time — the same
+// ordering Latest uses, so "newest" means one thing in this package. A rollback
+// republishes an old version, which makes it the newest, so it is never the row
+// this deletes.
+const pruneSQL = `
+DELETE FROM releases
+WHERE version IN (
+  SELECT version FROM releases
+  ORDER BY published_at DESC
+  OFFSET $1
+)
+RETURNING version, artifact
+`
+
+// PruneOld drops all but the newest `keep` releases and reports what went, so
+// the caller can remove their stored bytes too — the rows cascade nowhere, and
+// object storage has no idea a release existed.
+func PruneOld(ctx context.Context, pool *pgxpool.Pool, keep int) ([]Record, error) {
+	if keep < 1 {
+		// A publish that wiped every release including itself would be a very
+		// expensive typo.
+		return nil, fmt.Errorf("keep must be at least 1")
+	}
+	rows, err := pool.Query(ctx, pruneSQL, keep)
+	if err != nil {
+		return nil, fmt.Errorf("prune releases: %w", err)
+	}
+	defer rows.Close()
+
+	var gone []Record
+	for rows.Next() {
+		var r Record
+		if err := rows.Scan(&r.Version, &r.Artifact); err != nil {
+			return nil, fmt.Errorf("scan pruned release: %w", err)
+		}
+		gone = append(gone, r)
+	}
+	return gone, rows.Err()
+}
+
 // Delete unpublishes a version. The caller removes the stored bytes — there is
 // no cascade for object storage.
 func Delete(ctx context.Context, pool *pgxpool.Pool, version string) (bool, error) {

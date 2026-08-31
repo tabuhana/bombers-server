@@ -112,6 +112,22 @@ func TestPublicOriginFollowsTheRequest(t *testing.T) {
 	}
 }
 
+// The prune keeps the newest N by the SAME ordering Latest uses. If those two
+// ever disagreed, a publish could delete the release it just started serving.
+func TestPruneKeepsTheNewestByPublishTime(t *testing.T) {
+	if !strings.Contains(pruneSQL, "ORDER BY published_at DESC") {
+		t.Error("prune orders by something other than publish time — it could delete the release Latest is serving")
+	}
+	if !strings.Contains(pruneSQL, "OFFSET $1") {
+		t.Error("prune no longer keeps a configurable number of releases")
+	}
+	// Two rollback steps. One would mean `unpublish-release` had nothing to fall
+	// back to, which is the whole point of keeping any.
+	if KeepReleases < 2 {
+		t.Errorf("KeepReleases = %d — unpublish-release needs a previous release to fall back to", KeepReleases)
+	}
+}
+
 // Both clauses of the "which release is offered" query are decisions, not
 // details, and neither is visible in any signature — so an edit that drops one
 // would pass every other test here. This pins them.
