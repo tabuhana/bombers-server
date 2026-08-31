@@ -33,6 +33,33 @@ func runUpdate(_ []string) {
 	loadEnvAndConfig()
 	logx.Init()
 
+	// Refuse while the server is up.
+	//
+	// Migrating needs a database, and with the embedded backend `update` starts
+	// one — but a running server already has its own on that port. Worse, the
+	// port check reads a LIVE database as a leftover from a crash and tries to
+	// stop it, so the command that was supposed to update the server instead
+	// reaches over and kills the database out from under it.
+	//
+	// Stopping first is a decision the operator has to make anyway: an update
+	// replaces the binary, and the running process is the old one until it is
+	// restarted regardless.
+	// Two ways to be running, and the pidfile only knows about one of them: a
+	// service-launched server never backgrounds itself, so it writes none. The
+	// database port catches that case.
+	if embeddedpg.InUse() {
+		logx.Fatal("something is already using the database — the server is probably running. Stop it first:\n" +
+			"    bombers stop && bombers update && bombers start\n" +
+			"  (or `sudo bombers service stop` if it runs as a service)")
+	}
+	if pidPath, _, perr := runtimePaths(); perr == nil {
+		if pid := runningPid(pidPath); pid != 0 {
+			logx.Fatal("the server is running (pid %d) — stop it first:\n"+
+				"    bombers stop && bombers update && bombers start\n"+
+				"  (or `bombers service stop` if it runs as a service)", pid)
+		}
+	}
+
 	// Rebuild from the checkout recorded at install time, so `bombers update`
 	// works from any directory.
 	//

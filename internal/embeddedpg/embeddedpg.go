@@ -38,6 +38,23 @@ const (
 	database = "bombers"
 )
 
+// InUse reports whether something is already listening on the embedded
+// Postgres port.
+//
+// The port number lives only in this package, so the question has to be asked
+// here too. `update` uses it to refuse rather than assume: a listener on 5433
+// is either a running server or another update in flight, and the difference
+// between "stale, clean it up" and "live, leave it alone" is the difference
+// between tidying up and killing the database out from under a running server.
+func InUse() bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 // Instance is an opaque handle to a running embedded Postgres. Callers hold it
 // only to Stop the subprocess on shutdown; they never touch the library type.
 type Instance struct {

@@ -136,6 +136,11 @@ no `go build`. After `install`, it's out of the picture.
   otherwise systemd would start a console instead of a server.
 - `service` (systemd/launchd/Windows Service) remains for start-on-boot and
   restart-on-failure; it is no longer needed just to run in the background.
+  **`update` REFUSES while the server is running** — it checks both the pidfile
+  and the embedded Postgres port, because a service-launched server never
+  backgrounds itself and so writes no pidfile. Without that check, `update`'s
+  stale-port cleanup reads a LIVE database as a crash leftover and stops it,
+  killing the database out from under the running server.
   **`service install` sets the unit's user** (`svc.Config(user)` → `User=`),
   taken from `--user` or `SUDO_USER`, and **REFUSES to install a root-run
   service**. Installing needs root, so without this systemd would run the server

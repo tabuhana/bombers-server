@@ -150,6 +150,9 @@ and nobody has to re-enter anything.
 bombers update
 ```
 
+**Stop the server first** — `update` refuses while it's running, since migrating
+needs the database and a running server already holds it.
+
 It pulls the checkout it recorded at install time, rebuilds from it, then applies pending
 migrations from that same checkout — so it works from any directory. It does not
 start the server; that stays a separate act. Start it again with `bombers start`.
