@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -1249,6 +1250,22 @@ func runDoctor(_ []string) {
 				mark(markOK, "Media", fmt.Sprintf("S3/MinIO reachable: %s", cfg.S3Endpoint))
 			}
 		}
+	}
+
+	// 7. Can this machine take a backup?
+	//
+	// Asked HERE rather than discovered at `bombers backup`, because the moment
+	// you want a backup is the worst possible moment to learn you cannot take
+	// one. The built-in database ships only the SERVER binaries — initdb,
+	// pg_ctl, postgres — so a machine running it still needs the client package
+	// installed separately for pg_dump.
+	//
+	// A warning, not a failure: a server with no backup tooling runs perfectly
+	// well, right up until it matters.
+	if _, err := exec.LookPath("pg_dump"); err != nil {
+		mark(markSkip, "Backup", "pg_dump not found — `bombers backup` will not work (sudo apt install postgresql-client)")
+	} else {
+		mark(markOK, "Backup", "pg_dump found; backup and restore will work")
 	}
 
 	fmt.Println()

@@ -229,15 +229,25 @@ func Restore(ctx context.Context, path string, opts Options) (Manifest, error) {
 	return man, nil
 }
 
-// pgTool finds pg_dump or psql: the embedded Postgres's own copy first (so a
-// self-hosted install needs nothing installed system-wide), then the PATH.
+// pgTool finds pg_dump or psql.
+//
+// It checks the embedded Postgres's own bin directory first, which is worth
+// almost nothing and is kept for the day that changes: the distribution the
+// embedded backend downloads ships ONLY the server binaries — initdb, pg_ctl,
+// postgres. No client tools. So in practice this always falls through to the
+// PATH, and a machine running the embedded database still needs the client
+// package installed separately.
+//
+// That surprise is exactly why the message below names the fix rather than the
+// diagnosis. An earlier version said "this server has no embedded Postgres to
+// borrow it from", on a server that had one — true about pg_dump, wrong about
+// everything else, and no help at all.
 func pgTool(name, dataDir string) (string, error) {
 	exe := name
 	if runtime.GOOS == "windows" {
 		exe += ".exe"
 	}
 	if dataDir != "" {
-		// Where internal/embeddedpg extracts its distribution.
 		candidate := filepath.Join(dataDir, "pg", "runtime", "bin", exe)
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, nil
@@ -246,7 +256,10 @@ func pgTool(name, dataDir string) (string, error) {
 	if found, err := exec.LookPath(name); err == nil {
 		return found, nil
 	}
-	return "", fmt.Errorf("%s isn't installed and this server has no embedded Postgres to borrow it from — install the Postgres client tools (on Ubuntu: apt install postgresql-client)", name)
+	return "", fmt.Errorf("%s isn't installed.\n"+
+		"    Backup and restore shell out to the Postgres client tools, and the built-in\n"+
+		"    database does not include them — it ships only what the SERVER needs.\n"+
+		"    Install them once:  sudo apt install postgresql-client", name)
 }
 
 func runCapture(ctx context.Context, tool string, args ...string) ([]byte, error) {

@@ -165,9 +165,12 @@ no `go build`. After `install`, it's out of the picture.
   backup that only restores onto an identical setup isn't a backup. The archive
   holds a plain `pg_dump` plus the media as ordinary files, so it goes back into
   whatever the NEW machine runs — laptop's embedded Postgres to a VPS's system
-  one, filesystem media to MinIO. `pg_dump`/`psql` are borrowed from the
-  embedded distribution when there is one (`<dataDir>/pg/runtime/bin`) and from
-  PATH otherwise; shelling out rather than serialising rows here is a deliberate
+  one, filesystem media to MinIO. `pg_dump`/`psql` come from the PATH and must be
+  installed separately (`apt install postgresql-client`) — **the embedded
+  distribution ships only the SERVER binaries** (initdb, pg_ctl, postgres), so a
+  machine running the built-in database still has no client tools. `doctor`
+  checks for pg_dump so that is found before a backup is wanted rather than
+  during one. shelling out rather than serialising rows here is a deliberate
   refusal to be clever, since a hand-rolled dumper that gets one escaping rule
   wrong produces an archive that looks fine and restores wrong. `restore`
   REPLACES everything, makes you type RESTORE, and refuses outright when stdin
