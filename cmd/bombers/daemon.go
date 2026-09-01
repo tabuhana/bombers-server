@@ -10,8 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kardianos/service"
+
 	"github.com/tabuhana/bombers-server/internal/logx"
 	"github.com/tabuhana/bombers-server/internal/setup"
+	"github.com/tabuhana/bombers-server/internal/svc"
 )
 
 // Running detached, the way you'd expect a server to run: `bombers start`
@@ -160,6 +163,17 @@ func runStatusCmd(_ []string) {
 	}
 	pid := runningPid(pidPath)
 	if pid == 0 {
+		// The pidfile only knows about `bombers start`. A service-launched
+		// server never backgrounds itself, so it writes none — and this used to
+		// report "not running" about a server that was serving traffic
+		// perfectly, which is the most confusing thing a status command can do.
+		if serviceRunning() {
+			fmt.Println("bombers: running (as the OS service)")
+			fmt.Printf("  log:  %s\n", logPath)
+			fmt.Println("  admin: bombers console")
+			fmt.Println("  stop:  bombers service stop")
+			return
+		}
 		fmt.Println("bombers: not running")
 		fmt.Printf("  log:  %s\n", logPath)
 		return
@@ -225,4 +239,18 @@ func runRestart(args []string) {
 	// runStop only returns once the process is gone (or after warning that it
 	// hasn't gone), so the port is free by the time start binds it.
 	runStart(args)
+}
+
+// serviceRunning asks the OS service manager whether our unit is up.
+//
+// Best effort by design: building the handle can fail, and asking can be
+// refused for lack of privilege. Either way the answer is "no" and the caller
+// falls back to what the pidfile said — a status command should never fail, it
+// should just be less certain.
+func serviceRunning() bool {
+	s, err := service.New(newProgram(), svc.Config(""))
+	if err != nil {
+		return false
+	}
+	return svc.IsRunning(s)
 }

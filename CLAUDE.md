@@ -136,6 +136,11 @@ no `go build`. After `install`, it's out of the picture.
   otherwise systemd would start a console instead of a server.
 - `service` (systemd/launchd/Windows Service) remains for start-on-boot and
   restart-on-failure; it is no longer needed just to run in the background.
+  **`status` also asks the service manager**: the pidfile only knows about
+  `bombers start`, so a service-launched server used to be reported as "not
+  running" while it was serving traffic perfectly. The service check is best
+  effort — an error or a refusal is a "no", falling back to the pidfile answer,
+  because a status command should never fail, only be less certain.
   **`update` REFUSES while the server is running** — it checks both the pidfile
   and the embedded Postgres port, because a service-launched server never
   backgrounds itself and so writes no pidfile. Without that check, `update`'s

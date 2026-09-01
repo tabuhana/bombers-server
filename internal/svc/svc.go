@@ -175,6 +175,19 @@ func status(s service.Service) error {
 	return nil
 }
 
+// IsRunning reports whether an OS-registered service is currently running.
+//
+// Separate from `status` above because the two answer different questions:
+// that one PRINTS the service's state for `bombers service status`, while this
+// one is asked by `bombers status`, which has its own thing to say and only
+// needs a yes or no. Any uncertainty — not installed, no permission to ask, an
+// unknown state — is a no, since the caller has a pidfile answer to fall back
+// on and a wrong yes would be worse than a missing one.
+func IsRunning(s service.Service) bool {
+	st, err := s.Status()
+	return err == nil && st == service.StatusRunning
+}
+
 // friendly rewrites a low-level control failure into something a self-hoster
 // can act on. Registering or removing a system service needs elevation, so a
 // permission failure gets an explicit admin/root hint; everything else is
