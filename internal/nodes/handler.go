@@ -13,6 +13,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -73,7 +74,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 // install. (The /bundle suffix keeps this route clear of nodeshare's static
 // /nodes/received.)
 func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id := nodeID(r)
 	bundle, err := Bundle(r.Context(), h.pool, id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.WriteError(w, http.StatusNotFound, errNodeNotFound)
@@ -95,6 +96,25 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 //
 // The body IS the bundle, byte for byte — it's stored opaquely, so re-encoding
 // it here would only risk changing what the client meant to publish.
+// nodeID reads the {id} route parameter, decoded.
+//
+// A node id carries a namespace and therefore a COLON — `core:weather` — which
+// a client percent-encodes into the path. chi routes on the raw path whenever
+// it differs from the decoded one, and hands back the raw segment, so this
+// arrived as `core%3Aweather` and every lookup missed. The catalogue was fine
+// (no id in the URL) and installing was not, which made it look like the
+// PUBLISH had failed rather than the read.
+//
+// A decode failure keeps the raw value: a malformed escape is a lookup that
+// should miss, not a request that should crash.
+func nodeID(r *http.Request) string {
+	raw := chi.URLParam(r, "id")
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		return decoded
+	}
+	return raw
+}
+
 func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 	// Cap before reading: an unbounded ReadAll on a public route is how a
 	// server gets memory-exhausted by one request.
@@ -126,7 +146,7 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 // Idempotent — removing what isn't there reports `removed: false` rather than
 // 404, so a retry after a dropped response isn't an error.
 func (h *Handler) Unpublish(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id := nodeID(r)
 	removed, err := Unpublish(r.Context(), h.pool, id)
 	if err != nil {
 		logx.Error("nodes: unpublish %s: %v", id, err)
