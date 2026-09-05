@@ -39,12 +39,36 @@ const (
 	errProfileNotFound   = "profile_not_found"
 )
 
+// Notify is called when a change here matters to somebody else — today, when
+// you save your own card, so the friends holding a copy of it stop showing last
+// month's details. A function rather than an import of the notify package: a
+// domain reaching into another domain is the thing this codebase does not do.
+//
+// Nil means nobody is listening, which is how the tests build a handler.
+type Notify func(userIDs []string)
+
 type Handler struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	notify Notify
 }
 
-func NewHandler(pool *pgxpool.Pool) *Handler {
-	return &Handler{pool: pool}
+func NewHandler(pool *pgxpool.Pool, notify Notify) *Handler {
+	return &Handler{pool: pool, notify: notify}
+}
+
+// nudgeFriends tells everyone who holds a copy of this user's card that it
+// changed. Best-effort and deliberately after the write: a failure to look up
+// the friends list must not fail a save that already succeeded.
+func (h *Handler) nudgeFriends(ctx context.Context, userID string) {
+	if h.notify == nil {
+		return
+	}
+	ids, err := acceptedFriendIDs(ctx, h.pool, userID)
+	if err != nil {
+		logx.Error("profiles: notify friends: %v", err)
+		return
+	}
+	h.notify(ids)
 }
 
 // profileResponse is the JSON-safe view of a self-card. Birthday is emitted as
@@ -194,6 +218,7 @@ func (h *Handler) UpdateMine(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "could not save profile")
 		return
 	}
+	h.nudgeFriends(r.Context(), authedID)
 	resp := toResponse(saved, time.Now())
 	h.attachMedia(r.Context(), &resp)
 	httpx.WriteJSON(w, http.StatusOK, resp)

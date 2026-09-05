@@ -86,6 +86,12 @@ func (h *Handler) PutMyCard(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "could not publish card")
 		return
 	}
+	// Exactly the people whose copy just changed — a better list than "all my
+	// friends", and it's already in hand. Someone who was dropped from the share
+	// isn't told, which is correct: they'll find out by their copy 404ing.
+	if h.notify != nil {
+		h.notify(viewers)
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"viewers": viewers})
 }
 

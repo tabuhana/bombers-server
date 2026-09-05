@@ -40,6 +40,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/migrate"
 	"github.com/tabuhana/bombers-server/internal/nodes"
 	"github.com/tabuhana/bombers-server/internal/nodeshare"
+	"github.com/tabuhana/bombers-server/internal/notify"
 	"github.com/tabuhana/bombers-server/internal/packs"
 	"github.com/tabuhana/bombers-server/internal/presence"
 	"github.com/tabuhana/bombers-server/internal/profiles"
@@ -398,9 +399,21 @@ func buildAndServe() (*app, error) {
 	} else {
 		logx.Warn("discord sign-in is NOT configured — nobody can sign in. Set it from the console: `discord set <client-id> <secret> <redirect-url>`")
 	}
-	friendsHandler := friends.NewHandler(pool)
-	profilesHandler := profiles.NewHandler(pool)
-	messagingHandler := messaging.NewHandler(pool)
+	// The nudge channel. Every domain below is handed a small function rather
+	// than the hub itself, so none of them learns what a WebSocket is and the
+	// package-per-domain rule survives a feature that is genuinely cross-cutting.
+	notifyHandler := notify.NewHandler(issuer)
+	notifyHub := notifyHandler.Hub()
+
+	friendsHandler := friends.NewHandler(pool, func(userID string) {
+		notifyHub.Send(userID, notify.KindFriend, nil)
+	})
+	profilesHandler := profiles.NewHandler(pool, func(userIDs []string) {
+		notifyHub.SendMany(userIDs, notify.KindProfile, nil)
+	})
+	messagingHandler := messaging.NewHandler(pool, func(userID string) {
+		notifyHub.Send(userID, notify.KindDM, nil)
+	})
 	syncHandler := sync.NewHandler(pool)
 	nodesHandler := nodes.NewHandler(pool)
 	nodeshareHandler := nodeshare.NewHandler(pool)
@@ -444,6 +457,11 @@ func buildAndServe() (*app, error) {
 	// header on a socket, so the access token rides the `bearer` subprotocol and
 	// the handler verifies it with the same issuer.
 	r.Get("/rooms/{roomID}/ws", roomsHandler.Join)
+
+	// The per-user nudge socket, same auth trick and outside RequireAuth for the
+	// same reason. It carries no content — only "go and re-read something" — so a
+	// client that never connects is stale, never wrong.
+	r.Get("/notify/ws", notifyHandler.Listen)
 
 	r.Group(func(r chi.Router) {
 		r.Use(issuer.RequireAuth)

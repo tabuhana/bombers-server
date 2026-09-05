@@ -54,12 +54,25 @@ const (
 	requestActionReject
 )
 
+// Notify is called when the other party should look at their friends list
+// again — a request arrived, or one they sent was accepted. A function rather
+// than an import of the notify package: a domain reaching into another domain is
+// the thing this codebase does not do. Nil means nobody is listening.
+type Notify func(userID string)
+
 type Handler struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	notify Notify
 }
 
-func NewHandler(pool *pgxpool.Pool) *Handler {
-	return &Handler{pool: pool}
+func NewHandler(pool *pgxpool.Pool, notify Notify) *Handler {
+	return &Handler{pool: pool, notify: notify}
+}
+
+func (h *Handler) nudge(userID string) {
+	if h.notify != nil && userID != "" {
+		h.notify(userID)
+	}
 }
 
 // myCodeResponse is the success body for GET /friends/code.
@@ -148,6 +161,10 @@ func (h *Handler) SendRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A request that landed is worth seeing now — it shows up as a pill in their
+	// dock, and waiting for a refresh to find out somebody added you is the kind
+	// of lateness that makes an app feel dead.
+	h.nudge(target.ID)
 	httpx.WriteJSON(w, status, sendRequestResponse{
 		User:  target.public(),
 		State: state,
@@ -284,6 +301,9 @@ func (h *Handler) actOnRequest(w http.ResponseWriter, r *http.Request, action re
 		return
 	}
 
+	// Tell the person who asked. Accepting concerns them far more than it
+	// concerns you — you already know what you just clicked.
+	h.nudge(requesterID)
 	httpx.WriteJSON(w, http.StatusOK, sendRequestResponse{
 		User:  user.public(),
 		State: newState,

@@ -38,12 +38,29 @@ const (
 	errRecipient   = "recipient_not_found"
 )
 
+// Notify is called after a message is stored, so a recipient with the app open
+// sees it without waiting for a refresh. A function rather than an import of the
+// notify package: messaging has no business knowing what a WebSocket is, and a
+// domain reaching into another domain is the thing this codebase does not do.
+//
+// Nil is a valid value and means nobody is listening — the console and the tests
+// both build handlers that way.
+type Notify func(userID string)
+
 type Handler struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	notify Notify
 }
 
-func NewHandler(pool *pgxpool.Pool) *Handler {
-	return &Handler{pool: pool}
+func NewHandler(pool *pgxpool.Pool, notify Notify) *Handler {
+	return &Handler{pool: pool, notify: notify}
+}
+
+// nudge tells one user something changed, if anything is wired up to hear it.
+func (h *Handler) nudge(userID string) {
+	if h.notify != nil {
+		h.notify(userID)
+	}
 }
 
 // messageResponse is the JSON-safe view of a message.
@@ -120,6 +137,10 @@ func (h *Handler) Send(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "could not send message")
 		return
 	}
+	// Stored, so it's safe to say so. After the write and not before: a nudge for
+	// a message that failed to save would send the recipient looking for
+	// something that isn't there.
+	h.nudge(recipientID)
 	httpx.WriteJSON(w, http.StatusCreated, toResponse(saved))
 }
 

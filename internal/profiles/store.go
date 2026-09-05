@@ -129,6 +129,36 @@ func areFriends(ctx context.Context, db dbExecutor, a, b string) (bool, error) {
 	return ok, nil
 }
 
+// acceptedFriendIDs lists everyone with an accepted friendship to `userID` —
+// exactly the people who hold a copy of their card and should be told it moved.
+// Same narrow-query tradeoff as areFriends above.
+const acceptedFriendIDsSQL = `
+SELECT CASE WHEN user_a_id = $1 THEN user_b_id ELSE user_a_id END
+FROM friendships
+WHERE state = 'accepted' AND (user_a_id = $1 OR user_b_id = $1)
+`
+
+func acceptedFriendIDs(ctx context.Context, db dbExecutor, userID string) ([]string, error) {
+	rows, err := db.Query(ctx, acceptedFriendIDsSQL, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list friends: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan friend: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list friends: %w", err)
+	}
+	return out, nil
+}
+
 // mediaURLs returns the serve-URLs for a user's uploaded profile media
 // (avatar/banner), nil for a kind they haven't uploaded. Narrow read against
 // the media domain's user_media table — same loose-coupling tradeoff as
