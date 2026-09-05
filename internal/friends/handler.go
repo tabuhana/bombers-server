@@ -483,6 +483,11 @@ func (h *Handler) RemoveFriend(w http.ResponseWriter, r *http.Request) {
 		writeSendRequestError(w, actErr)
 		return
 	}
+	// The OTHER party is the one who needs to know. Their client holds a card
+	// claiming a link that no longer exists — still offering to message you,
+	// still waiting on facts that stopped coming — and nothing local to them
+	// happened, so nothing local to them can notice.
+	h.nudge(targetID)
 	httpx.WriteJSON(w, http.StatusOK, sendRequestResponse{
 		User:  user.public(),
 		State: responseStateRemoved,
