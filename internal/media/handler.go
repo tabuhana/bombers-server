@@ -1,6 +1,7 @@
 package media
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -40,13 +41,38 @@ var allowedContentTypes = map[string]bool{
 	"image/webp": true,
 }
 
+// Notify is called when an upload or a delete changes what a user's card looks
+// like, so the friends holding a copy of it stop showing the old picture.
+// ownerID is whose card it is. A function rather than an import of the notify
+// package, for the reason profiles.Notify gives: a domain reaching into another
+// domain is the thing this codebase does not do.
+//
+// Nil means nobody is listening.
+type Notify func(ownerID string, viewerIDs []string)
+
 type Handler struct {
 	pool    *pgxpool.Pool
 	storage Store
+	notify  Notify
 }
 
-func NewHandler(pool *pgxpool.Pool, storage Store) *Handler {
-	return &Handler{pool: pool, storage: storage}
+func NewHandler(pool *pgxpool.Pool, storage Store, notify Notify) *Handler {
+	return &Handler{pool: pool, storage: storage, notify: notify}
+}
+
+// nudgeFriends tells everyone who holds a copy of this user's card that its
+// pictures changed. Best-effort and after the write, as in profiles: a failure
+// to list the friends must not fail an upload that already succeeded.
+func (h *Handler) nudgeFriends(ctx context.Context, userID string) {
+	if h.notify == nil {
+		return
+	}
+	ids, err := acceptedFriendIDs(ctx, h.pool, userID)
+	if err != nil {
+		logx.Error("media: notify friends: %v", err)
+		return
+	}
+	h.notify(userID, ids)
 }
 
 // mediaResponse is the JSON shape returned by a successful upload — the same
@@ -128,6 +154,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "could not store media")
 		return
 	}
+	h.nudgeFriends(r.Context(), authedID)
 	httpx.WriteJSON(w, http.StatusOK, toResponse(m))
 }
 
@@ -159,6 +186,7 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		// anymore; log and move on rather than failing the delete.
 		logx.Error("media: remove object: %v", err)
 	}
+	h.nudgeFriends(r.Context(), authedID)
 	httpx.WriteJSON(w, http.StatusNoContent, nil)
 }
 
@@ -217,8 +245,9 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request) {
 
 	// Cheap conditional-request support: updated_at is the version, so the
 	// ETag can answer an If-None-Match revalidation without touching the
-	// object store at all.
-	etag := fmt.Sprintf(`"%s-%d"`, m.Kind, m.UpdatedAt.Unix())
+	// object store at all. Milliseconds for the same reason as the URL's ?v=
+	// (types.MediaURL): two uploads inside one second must not look identical.
+	etag := fmt.Sprintf(`"%s-%d"`, m.Kind, m.UpdatedAt.UnixMilli())
 	if r.Header.Get("If-None-Match") == etag {
 		w.Header().Set("ETag", etag)
 		w.WriteHeader(http.StatusNotModified)

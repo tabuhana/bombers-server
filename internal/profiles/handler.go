@@ -30,22 +30,31 @@ const (
 	maxNickname    = 100
 	maxCity        = 120
 
+	// Crop bounds: x and y are CSS object-position percentages, scale is zoom
+	// from none to 4×.
+	maxCropPosition = 100
+	minCropScale    = 1
+	maxCropScale    = 4
+
 	birthdayLayout = "2006-01-02"
 
 	// Client-branching error codes.
 	errInvalidBirthday   = "invalid_birthday"
 	errInvalidVisibility = "invalid_visibility"
 	errFieldTooLong      = "field_too_long"
+	errInvalidCrop       = "invalid_crop"
 	errProfileNotFound   = "profile_not_found"
 )
 
 // Notify is called when a change here matters to somebody else — today, when
-// you save your own card, so the friends holding a copy of it stop showing last
-// month's details. A function rather than an import of the notify package: a
-// domain reaching into another domain is the thing this codebase does not do.
+// you save your own card or publish its notes, so the friends holding a copy of
+// it stop showing last month's details. ownerID is whose card changed, so a
+// client re-reads that one person instead of every card it holds. A function
+// rather than an import of the notify package: a domain reaching into another
+// domain is the thing this codebase does not do.
 //
 // Nil means nobody is listening, which is how the tests build a handler.
-type Notify func(userIDs []string)
+type Notify func(ownerID string, viewerIDs []string)
 
 type Handler struct {
 	pool   *pgxpool.Pool
@@ -68,7 +77,7 @@ func (h *Handler) nudgeFriends(ctx context.Context, userID string) {
 		logx.Error("profiles: notify friends: %v", err)
 		return
 	}
-	h.notify(ids)
+	h.notify(userID, ids)
 }
 
 // profileResponse is the JSON-safe view of a self-card. Birthday is emitted as
@@ -89,11 +98,16 @@ type profileResponse struct {
 	// per-friend choice to make about your own birthday, so any accepted friend
 	// reads these. What you DO choose about, your notes, isn't here: it's
 	// published per viewer (see cards_handler.go).
-	Nickname  string     `json:"nickname"`
-	City      string     `json:"city"`
-	AvatarURL *string    `json:"avatar_url"`
-	BannerURL *string    `json:"banner_url"`
-	UpdatedAt *time.Time `json:"updated_at"`
+	Nickname  string  `json:"nickname"`
+	City      string  `json:"city"`
+	AvatarURL *string `json:"avatar_url"`
+	BannerURL *string `json:"banner_url"`
+	// How each image sits in its frame (see crop). Never null — a card with no
+	// framing stored carries the defaults — so a client has no missing case to
+	// guess a meaning for.
+	AvatarCrop crop       `json:"avatar_crop"`
+	BannerCrop crop       `json:"banner_crop"`
+	UpdatedAt  *time.Time `json:"updated_at"`
 }
 
 // attachMedia fills the response's avatar/banner URLs from the user_media
@@ -121,6 +135,8 @@ func toResponse(p *profileRecord, now time.Time) profileResponse {
 		Visibility:  p.Visibility,
 		Nickname:    p.Nickname,
 		City:        p.City,
+		AvatarCrop:  p.AvatarCrop.orDefault(),
+		BannerCrop:  p.BannerCrop.orDefault(),
 	}
 	if !p.UpdatedAt.IsZero() {
 		resp.UpdatedAt = &p.UpdatedAt
@@ -147,9 +163,15 @@ func deriveAge(birthday, now time.Time) *int {
 }
 
 // defaultProfile is what GetMine returns before the user has saved anything, so
-// the client always receives an editable shape.
+// the client always receives an editable shape — crops included, at their
+// defaults.
 func defaultProfile(userID string) profileResponse {
-	return profileResponse{UserID: userID, Visibility: VisibilityFriends}
+	return profileResponse{
+		UserID:     userID,
+		Visibility: VisibilityFriends,
+		AvatarCrop: defaultCrop,
+		BannerCrop: defaultCrop,
+	}
 }
 
 // GetMine returns the authed user's own self-card (or an empty default).
@@ -188,6 +210,10 @@ type updateProfileRequest struct {
 	Visibility  string `json:"visibility"`
 	Nickname    string `json:"nickname"`
 	City        string `json:"city"`
+	// Optional, unlike everything above: nil (omitted or null) keeps the stored
+	// framing — see upsertProfileSQL for why.
+	AvatarCrop *crop `json:"avatar_crop"`
+	BannerCrop *crop `json:"banner_crop"`
 }
 
 // UpdateMine upserts the authed user's self-card.
@@ -258,6 +284,12 @@ func (req *updateProfileRequest) toRecord(userID string) (*profileRecord, string
 		birthday = &t
 	}
 
+	for _, c := range []*crop{req.AvatarCrop, req.BannerCrop} {
+		if c != nil && !c.valid() {
+			return nil, errInvalidCrop
+		}
+	}
+
 	return &profileRecord{
 		UserID:      userID,
 		DisplayName: displayName,
@@ -268,7 +300,18 @@ func (req *updateProfileRequest) toRecord(userID string) (*profileRecord, string
 		Visibility:  visibility,
 		Nickname:    nickname,
 		City:        city,
+		AvatarCrop:  req.AvatarCrop,
+		BannerCrop:  req.BannerCrop,
 	}, ""
+}
+
+// valid reports whether a crop can be drawn as sent: a position inside the frame
+// and a zoom in range. Refused rather than clamped, so a client with a cropper
+// bug hears about it instead of saving a quietly different framing.
+func (c *crop) valid() bool {
+	return c.X >= 0 && c.X <= maxCropPosition &&
+		c.Y >= 0 && c.Y <= maxCropPosition &&
+		c.Scale >= minCropScale && c.Scale <= maxCropScale
 }
 
 // GetForUser returns another user's self-card, subject to visibility. Viewing
@@ -314,7 +357,8 @@ func (h *Handler) resolveVisibleProfile(ctx context.Context, authedID, targetID 
 		if err != nil {
 			if errors.Is(err, ErrProfileNotFound) {
 				// Represent the never-saved self-card as an empty record so the
-				// caller still gets a 200 with a usable shape.
+				// caller still gets a 200 with a usable shape. It has no crops,
+				// which toResponse renders as the 50/50/1 defaults.
 				return &profileRecord{UserID: authedID, Visibility: VisibilityFriends}, ""
 			}
 			logx.Error("profiles: get own (via for-user): %v", err)

@@ -2,6 +2,7 @@ package profiles
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -62,5 +63,15 @@ func TestCardResponseEscapesTheOwnerID(t *testing.T) {
 	}
 	if string(parsed.Content) != `{"ok":true}` {
 		t.Errorf("content was displaced by the owner id: %s", parsed.Content)
+	}
+}
+
+// An unshare has to reach the person it was taken from. Nudging only the viewers
+// a publish leaves behind tells everyone except the one reader whose copy just
+// went stale, and they'd go on seeing the notes until their next refresh.
+func TestNudgeListIncludesViewersThePublishDropped(t *testing.T) {
+	got := nudgeList([]string{"u1", "u2"}, []string{"u2", "u3"})
+	if want := []string{"u1", "u2", "u3"}; !slices.Equal(got, want) {
+		t.Errorf("nudgeList = %v, want %v — everyone before or after, each once", got, want)
 	}
 }

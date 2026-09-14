@@ -20,10 +20,12 @@ func ValidMediaKind(s string) bool {
 // MediaURL is the server-relative URL a client fetches a user's media from
 // (authenticated, proxied through the server — never a direct bucket link).
 // The ?v= query is a cache-buster derived from the row's updated_at, so a
-// reupload produces a new URL and stale client caches miss. Shared here so the
+// reupload produces a new URL and stale client caches miss. In milliseconds:
+// at whole seconds, two uploads inside the same second shared a URL, and a
+// client that had cached the first never fetched the second. Shared here so the
 // media domain (upload responses) and the profiles domain (avatar_url /
 // banner_url fields) emit the exact same shape without reaching into each
 // other.
 func MediaURL(userID, kind string, updatedAt time.Time) string {
-	return fmt.Sprintf("/media/%s/%s?v=%d", userID, kind, updatedAt.Unix())
+	return fmt.Sprintf("/media/%s/%s?v=%d", userID, kind, updatedAt.UnixMilli())
 }

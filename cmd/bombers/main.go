@@ -408,16 +408,20 @@ func buildAndServe() (*app, error) {
 	friendsHandler := friends.NewHandler(pool, func(userID string) {
 		notifyHub.Send(userID, notify.KindFriend, nil)
 	})
-	profilesHandler := profiles.NewHandler(pool, func(userIDs []string) {
-		notifyHub.SendMany(userIDs, notify.KindProfile, nil)
-	})
-	messagingHandler := messaging.NewHandler(pool, func(userID string) {
-		notifyHub.Send(userID, notify.KindDM, nil)
+	// `from` is who caused the nudge, so a client re-reads that one card or
+	// conversation instead of everything it holds. Media sends the same profile
+	// nudge as profiles does: a new avatar is a changed card too.
+	profileNudge := func(ownerID string, viewerIDs []string) {
+		notifyHub.SendMany(viewerIDs, notify.KindProfile, map[string]string{"from": ownerID})
+	}
+	profilesHandler := profiles.NewHandler(pool, profileNudge)
+	messagingHandler := messaging.NewHandler(pool, func(recipientID, senderID string) {
+		notifyHub.Send(recipientID, notify.KindDM, map[string]string{"from": senderID})
 	})
 	syncHandler := sync.NewHandler(pool)
 	nodesHandler := nodes.NewHandler(pool)
 	nodeshareHandler := nodeshare.NewHandler(pool)
-	mediaHandler := media.NewHandler(pool, storage)
+	mediaHandler := media.NewHandler(pool, storage, profileNudge)
 	roomsHandler := rooms.NewHandler(pool, issuer)
 	activitiesHandler := activities.NewHandler(pool, storage)
 	packsHandler := packs.NewHandler(pool, storage)

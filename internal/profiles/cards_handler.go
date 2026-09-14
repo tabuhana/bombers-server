@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 
 	"github.com/go-chi/chi/v5"
 
@@ -74,6 +75,15 @@ func (h *Handler) PutMyCard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Who could read the card before this publish, asked first because the
+	// replace erases the answer. Only the nudge below uses it, so a failed lookup
+	// is logged and the publish goes ahead: a notification never gets to make a
+	// save more fallible.
+	before, err := CardViewers(r.Context(), h.pool, authedID)
+	if err != nil {
+		logx.Error("profiles: list previous card viewers: %v", err)
+	}
+
 	if _, err := ReplaceCards(r.Context(), h.pool, authedID, req); err != nil {
 		logx.Error("profiles: publish cards: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not publish card")
@@ -87,12 +97,21 @@ func (h *Handler) PutMyCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Exactly the people whose copy just changed — a better list than "all my
-	// friends", and it's already in hand. Someone who was dropped from the share
-	// isn't told, which is correct: they'll find out by their copy 404ing.
+	// friends". That includes whoever was dropped from the share: theirs is the
+	// copy that went stale, and being told is what makes the unshare land now
+	// rather than on their next refresh.
 	if h.notify != nil {
-		h.notify(viewers)
+		h.notify(authedID, nudgeList(before, viewers))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"viewers": viewers})
+}
+
+// nudgeList is everyone who could read a card before a publish or can after it,
+// each once.
+func nudgeList(before, after []string) []string {
+	ids := slices.Concat(before, after)
+	slices.Sort(ids)
+	return slices.Compact(ids)
 }
 
 // GetCardFrom returns what one person published FOR ME.

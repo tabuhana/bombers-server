@@ -1,8 +1,9 @@
 // Package notify is the nudge channel: one socket per signed-in user, carrying
 // "something you care about changed, go and look".
 //
-// It carries NO CONTENT, and that is the whole design. A nudge is `{"t":"dm"}`,
-// not the message; the client hears it and re-reads through the ordinary HTTP
+// It carries NO CONTENT, and that is the whole design. A nudge is
+// `{"t":"dm","d":{"from":"<user id>"}}` — what changed and whose it is — never
+// the message itself; the client hears it and re-reads through the ordinary HTTP
 // API, which already knows who is allowed to see what. So this package needs no
 // permission model of its own, cannot leak anything by getting a broadcast list
 // slightly wrong, and stays true to the product rule that the server is a
@@ -33,10 +34,14 @@ import (
 // screen in the client re-reads something when it hears it, and a kind nobody
 // listens for is just noise on a wire.
 const (
-	// KindDM — a direct message arrived. `d` carries {"from": "<user id>"} so a
+	// KindDM — a direct message arrived. `d` carries {"from": "<sender id>"} so a
 	// client showing one conversation can ignore the rest.
 	KindDM = "dm"
-	// KindProfile — someone whose card you may hold has changed their details.
+	// KindProfile — someone whose card you may hold changed it: their details,
+	// their avatar or banner, or what their card shares with you (sent to the
+	// viewers before a publish as well as after, so an unshare reaches the person
+	// it was taken from). `d` carries {"from": "<owner id>"} so a client re-reads
+	// that one card rather than every card it holds.
 	KindProfile = "profile"
 	// KindFriend — a friend request arrived, or one you sent was accepted.
 	KindFriend = "friend"
