@@ -515,11 +515,6 @@ func buildAndServe() (*app, error) {
 			r.Use(apitokens.RequireScope(apitokens.PeopleRead))
 			r.Get("/me/profile", profilesHandler.GetMine)
 			r.Get("/profiles/{userID}", profilesHandler.GetForUser)
-			// The notes half of a person card, as that owner published it FOR
-			// YOU. Friend-gated, and every refusal is the same opaque 404 —
-			// "they shared nothing with me" must not be distinguishable from
-			// "they shared plenty, none of it with me".
-			r.Get("/cards/{ownerID}", profilesHandler.GetCardFrom)
 			r.Get("/me/about", profilesHandler.ListMyAbout)
 			r.Get("/me/about/{subjectID}", profilesHandler.GetMyAbout)
 			r.Get("/about/{authorID}", profilesHandler.GetSharedAbout)
@@ -554,12 +549,6 @@ func buildAndServe() (*app, error) {
 		// Your status AND your heartbeat, in one write: two calls that must
 		// agree are two calls that can disagree.
 		r.Put("/me/presence", presenceHandler.SetMine)
-		// Your notes, already narrowed to each reader. The client works out who
-		// should see what — its own relationship groups, its own per-note
-		// exceptions — and publishes one blob per friend; the server stores them
-		// opaquely and hands out whichever belongs to the reader. A publish
-		// REPLACES the whole set, so unsharing is a row that stops existing.
-		r.Put("/me/card", profilesHandler.PutMyCard)
 		r.Put("/me/about/{subjectID}", profilesHandler.UpsertMyAbout)
 		r.Delete("/me/about/{subjectID}", profilesHandler.DeleteMyAbout)
 		// Static /messages/unread is registered before the /messages/{userID}
