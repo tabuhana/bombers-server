@@ -107,7 +107,9 @@ type createRequest struct {
 	Name string `json:"name"`
 }
 
-type createResponse struct {
+// roomResponse is a room as HTTP describes it: what creating one hands back, and
+// what asking after one returns.
+type roomResponse struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	HostID string `json:"host_id"`
@@ -145,11 +147,48 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	id := ulid.Make().String()
 	room := h.hub.Create(id, name, authedID, time.Now())
-	httpx.WriteJSON(w, http.StatusCreated, createResponse{
+	httpx.WriteJSON(w, http.StatusCreated, roomResponse{
 		ID:     room.ID,
 		Name:   room.Name(),
 		HostID: room.HostID,
 	})
+}
+
+// Get answers whether a room is still open, for an invite deciding between a
+// Join button and "Room closed". It asks nothing a join wouldn't: the same gate,
+// and every refusal — no such room, an ended one, not the host's friend — is the
+// same 404, so an id still can't be probed. Closed is final; a room never reopens.
+func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
+	authedID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	room, err := h.hub.Get(chi.URLParam(r, "roomID"))
+	if err != nil || !h.allowed(r.Context(), room, authedID) {
+		httpx.WriteError(w, http.StatusNotFound, errRoomNotFound)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, roomResponse{
+		ID:     room.ID,
+		Name:   room.Name(),
+		HostID: room.HostID,
+	})
+}
+
+// allowed is the one rule for reaching a room, shared by joining and asking
+// after one: you are its host, or an accepted friend of the host — the same rule
+// as every other cross-user surface. A failed check counts as no.
+func (h *Handler) allowed(ctx context.Context, room *Room, userID string) bool {
+	if room.HostID == userID {
+		return true
+	}
+	friends, err := areFriends(ctx, h.pool, room.HostID, userID)
+	if err != nil {
+		logx.Error("rooms: friendship check: %v", err)
+		return false
+	}
+	return friends
 }
 
 // Join upgrades to a WebSocket and runs the member's session.
@@ -179,20 +218,11 @@ func (h *Handler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Friend-gating, same rule as every other cross-user surface: you may join a
-	// room whose host is you or an accepted friend. Anything else collapses to
-	// the same opaque 404 so a room id can't be probed.
-	if room.HostID != claims.UserID {
-		friends, err := areFriends(r.Context(), h.pool, room.HostID, claims.UserID)
-		if err != nil {
-			logx.Error("rooms: friendship check: %v", err)
-			httpx.WriteError(w, http.StatusNotFound, errNotAllowed)
-			return
-		}
-		if !friends {
-			httpx.WriteError(w, http.StatusNotFound, errNotAllowed)
-			return
-		}
+	// Anyone but the host or a friend of theirs gets the same opaque 404 as a
+	// missing room, so a room id can't be probed.
+	if !h.allowed(r.Context(), room, claims.UserID) {
+		httpx.WriteError(w, http.StatusNotFound, errNotAllowed)
+		return
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{

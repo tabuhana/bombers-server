@@ -586,6 +586,9 @@ func buildAndServe() (*app, error) {
 		// Creating a room is ordinary authed HTTP; the creator becomes its host
 		// (the referee). Rooms are in-memory and ephemeral - nothing persists.
 		r.Post("/rooms", roomsHandler.Create)
+		// Is a room still open? A DM invite asks before offering Join. Same gate
+		// as the join itself, and the same opaque 404 for every refusal.
+		r.Get("/rooms/{roomID}", roomsHandler.Get)
 		// The activity (game) store: browse, install, and fetch a game's assets.
 		// Admin-only game curation — the console's publish-game/unpublish-game
 		// reached over HTTP, so an operator can publish from the client instead
