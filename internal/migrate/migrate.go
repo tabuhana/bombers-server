@@ -1,12 +1,12 @@
-// Package migrate applies the embedded SQL migrations programmatically at
-// startup for local self-host mode, so a self-hoster never installs goose or
-// runs a separate step (LOCAL_MODE.md §9). It drives the goose v3 LIBRARY over
-// the migrations embedded by the migrations package, reusing the same
-// goose_db_version tracking table the goose CLI uses — so the CLI and this stay
-// perfectly consistent.
+// Package migrate applies the SQL migrations programmatically, so nobody has to
+// install goose or pass it a -dir flag (LOCAL_MODE.md §9). It drives the goose
+// v3 LIBRARY, reusing the same goose_db_version tracking table the goose CLI
+// uses — so the CLI and this stay perfectly consistent.
 //
-// Only the embedded-Postgres backend calls this. External Postgres (managed or
-// local-external) keeps today's behavior: the operator runs goose deliberately.
+// Callers: server startup (always for embedded Postgres; for an external
+// database only with AUTO_MIGRATE=true), `bombers setup` (the migrations
+// embedded in the binary) and `bombers update` (the checkout it just rebuilt
+// from — see UpFrom).
 package migrate
 
 import (

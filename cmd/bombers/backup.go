@@ -24,9 +24,9 @@ import (
 //
 // One file, and it is deliberately portable rather than a snapshot of this
 // installation: a plain SQL dump plus the media as ordinary files, so it can go
-// back into whatever the NEW machine is running. Moving from the laptop's
-// embedded Postgres to a VPS's system one, or from filesystem media to MinIO, is
-// the normal case, not an edge case.
+// back into whatever the NEW machine is running. Moving from one machine's
+// embedded Postgres to another's system one, or from filesystem media to MinIO,
+// is the normal case, not an edge case.
 
 // humanSize renders bytes for a line somebody reads once.
 func humanSize(n int64) string {

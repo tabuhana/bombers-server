@@ -65,7 +65,7 @@ bombers> logtime  # show/set the log timestamp format (time|datetime|iso)
 bombers> stop     # graceful shutdown (aliases: quit, exit)
 ```
 
-The console is local-operator-privileged (whoever holds the terminal is the op — no auth). For daemons/service managers, `--headless` skips the console and the process serves until SIGINT/SIGTERM (a non-TTY stdin or console EOF falls back to the same). Destructive admin commands (delete user, promote admin) are a deliberate later follow-up.
+The console is local-operator-privileged (whoever holds the terminal is the op — no auth). A bare `bombers` opens it as its own process against a running server; `bombers start --foreground` runs it inside the server, where `--headless` skips it and the process serves until SIGINT/SIGTERM (a non-TTY stdin or console EOF falls back to the same). User administration lives there too: `ban`/`unban`, `deluser`, and `admin`/`unadmin` for the admin role.
 
 **Startup + logging:** on a real terminal the console opens with a colored **BOMBERS/NOTEBOOK** ASCII banner, then the startup logs, then the `bombers>` prompt. Every server log (startup lifecycle + per-request error logs) prints one line as `[<timestamp>][<LEVEL>]: <message>` through the shared `internal/logx` package (levels `INFO`/`WARN`/`ERROR`/`FATAL`; `FATAL` exits 1). Color is 24-bit truecolor, auto-enabled only when stdout is a character device **and** `NO_COLOR` is unset — piped or redirected output stays plain and greppable, and the banner is skipped. `LOG_TIME_FORMAT` (`time` = `15:04:05`, `datetime` = `2006-01-02 15:04:05`, `iso` = RFC 3339; default `datetime`) picks the timestamp layout at boot; the `logtime` console command switches it live.
 

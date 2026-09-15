@@ -1,9 +1,10 @@
-// Package setup is local self-host mode's configuration layer: data-directory
-// resolution, the JSON config file the first-run wizard writes, and the env
-// pre-population that lets config.Load stay a single env-only loader. It runs
-// only for `server local` / `server setup`; the managed (no-subcommand) path
-// never touches it. Like logx it is a leaf — stdlib only, no domain imports —
-// so any caller can pull it in without dragging along the rest of the tree.
+// Package setup is self-hosting's configuration layer: data-directory
+// resolution, the JSON config file the setup wizard writes, and the env
+// pre-population that lets config.Load stay a single env-only loader. Every
+// server start layers the file (a no-op when the environment is complete, as
+// on a managed host), and `bombers setup` runs the wizard. Like logx it is a
+// leaf — no internal imports — so any caller can pull it in without dragging
+// along the rest of the tree.
 //
 // The precedence rule the whole design rests on: a real environment variable
 // always wins. Apply only fills a var the environment left empty, so the file
@@ -55,9 +56,9 @@ const (
 // none, because it looks finished.
 var ErrCancelled = errors.New("setup cancelled")
 
-// DataDir resolves (but does NOT create) the directory the local server owns.
-// Today that's just the config file; later phases add the embedded Postgres
-// data dir, filesystem media, and cached binaries under the same root.
+// DataDir resolves (but does NOT create) the directory the local server owns:
+// config.json, install.json, the pidfile and server.log, the embedded Postgres
+// under pg/ and, by default, filesystem media under media/.
 // BOMBERS_DATA_DIR overrides; otherwise it is "Bombers" under the OS
 // user-config dir (%AppData% on Windows, ~/.config on Linux, ~/Library/
 // Application Support on macOS).

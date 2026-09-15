@@ -57,10 +57,9 @@ import (
 // version is the bombers CLI version, reported by `bombers version`.
 const version = "0.1.0-dev"
 
-// main is a small subcommand dispatcher. A bare invocation (or one that starts
-// straight into flags like --headless) defaults to `start`, so the pre-CLI
-// behavior — run the server — is preserved; help/version short-circuit before
-// any work happens.
+// main is a small subcommand dispatcher: the first non-flag word picks the
+// command, and a bare invocation opens the admin console. help/version
+// short-circuit before any work happens.
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 {
@@ -197,16 +196,17 @@ Uninstall:
                               embedded-Postgres data + cached binaries) after a
                               confirmation. --yes skips the prompt for scripts.
 
-A bare "bombers" (or "bombers --headless") runs start. On a local self-host,
-start auto-detects the saved config and runs the first-run wizard when the
-config is incomplete; setup forces that wizard to reconfigure. A managed/cloud
-run stays pure-env: nothing is written to disk. Run "bombers setup" once before
+A bare "bombers" opens the admin console; the server itself runs with "bombers
+start", using the config "bombers setup" saved. If that config is incomplete,
+"start --foreground" at a terminal asks the setup questions first, and a
+background start exits pointing you at setup. A managed/cloud run stays
+pure-env: nothing is written to disk. Run "bombers setup" once before
 "bombers service install" so the service boots from a complete config.
 
-console connects to the SAME database a background/headless server (or the OS
-service) is using, so you can run admin commands against a server you started
-elsewhere. Leaving it with exit/quit/stop does NOT stop that server — it keeps
-serving; stop the server with "bombers service stop" or a signal to its process.
+console connects to the SAME database a background server (or the OS service)
+is using, so you can run admin commands against a server you started elsewhere.
+Leaving it with exit/quit/stop does NOT stop that server — it keeps serving;
+stop it with "bombers stop" ("bombers service stop" if it runs as a service).
 `)
 }
 
@@ -259,7 +259,14 @@ func buildAndServe() (*app, error) {
 		}
 		if setup.NeedsWizard(fc) {
 			if console.Interactive(os.Stdin) {
-				setup.Wizard(fc, dataDir)
+				// Same rule as `bombers setup`: a half-answered config looks
+				// finished, so an abandoned or failed wizard saves nothing.
+				if err := setup.Wizard(fc, dataDir); err != nil {
+					if errors.Is(err, setup.ErrCancelled) {
+						return nil, errors.New("setup cancelled — nothing was saved")
+					}
+					return nil, fmt.Errorf("setup: %w", err)
+				}
 				setup.EnsureSecret(fc)
 				if err := fc.Save(dataDir); err != nil {
 					return nil, fmt.Errorf("saving local config: %w", err)
@@ -290,9 +297,9 @@ func buildAndServe() (*app, error) {
 
 	// Database. Two backends behind the same pool: an external DATABASE_URL (the
 	// managed default, and a valid local pick too) or an embedded Postgres the
-	// server runs itself for local self-host (LOCAL_MODE.md §6). Only the
-	// embedded path auto-runs migrations; external keeps today's behavior — the
-	// operator runs goose deliberately.
+	// server runs itself for local self-host (LOCAL_MODE.md §6). The embedded
+	// path always migrates here; an external database only does with
+	// AUTO_MIGRATE=true, and otherwise `bombers update` applies them.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	var pool *pgxpool.Pool
 	var epg *embeddedpg.Instance
@@ -669,11 +676,10 @@ func (a *app) shutdown() {
 	}
 }
 
-// runStart runs the HTTP server on the interactive/CLI path. It parses
-// --headless, brings up the logger + banner, builds and serves via
-// buildAndServe (Fatal on setup error, exactly as before), then waits for the
-// console or a signal to stop and tears down. This is the default command, so a
-// bare `bombers` (in a terminal) dispatches here.
+// runStart runs the HTTP server on the CLI path. At a terminal it relaunches
+// itself in the background and returns; otherwise (or with --foreground) it
+// brings up the banner, builds and serves via buildAndServe (Fatal on setup
+// error), then waits for the console or a signal to stop and tears down.
 func runStart(args []string) {
 	flags := flag.NewFlagSet("start", flag.ExitOnError)
 	headless := flags.Bool("headless", false,
@@ -726,9 +732,6 @@ func runStart(args []string) {
 		return
 	}
 
-	// Load .env before configuring the logger so LOG_TIME_FORMAT / NO_COLOR from
-	// the file take effect; hold any real load error until logx is up to report
-	// it in the leveled format.
 	// The banner is decorative — print it on a real terminal only so piped or
 	// redirected logs stay clean.
 	if logx.Interactive() {

@@ -12,11 +12,8 @@ import (
 	"github.com/tabuhana/bombers-server/internal/nodes"
 )
 
-// The command set: read-only introspection, stop, and the NODE STORE's
-// operator-publish surface (publish/unpublish/store) — the console IS the
-// store's admin path, a deliberate step past read-only (there is no HTTP
-// publish endpoint and no admin role yet). Anything else that mutates
-// (delete user, promote admin) still waits for the admin-role follow-up.
+// The command set: introspection, stop, the stores' publish commands, user
+// administration (ban, deluser), the admin role, and the sign-in settings.
 func builtins() []command {
 	return []command{
 		{name: "help", help: "list available commands", run: runHelp},

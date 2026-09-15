@@ -1,11 +1,11 @@
 // Package console is the server's interactive admin surface: a Minecraft-style
-// stdin command loop the binary runs by default (skip it with --headless).
-// Whoever is at the local terminal is the operator by definition — there is no
-// auth here. The built-ins are read-only introspection, `stop`, and the node
-// store's operator-publish commands (`publish`/`unpublish`/`store` — the
-// console is the store's ONLY publish path; no HTTP endpoint). Destructive or
-// admin-role commands (delete user, promote admin, an is_admin column) are a
-// deliberate LATER follow-up, not part of this loop yet.
+// stdin command loop. A bare `bombers` opens it as its own process against the
+// server's database; `bombers start --foreground` runs it inside the server
+// (skip it with --headless). Whoever is at the local terminal is the operator by
+// definition — there is no auth here. Beyond introspection and `stop`, it
+// publishes nodes, games and packs (the admin-gated HTTP routes are the other
+// way in), administers users (`ban`, `deluser`), manages sign-in, and is the
+// root of trust for the admin role (`admin`/`unadmin`) — no endpoint grants it.
 package console
 
 import (

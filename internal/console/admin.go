@@ -16,8 +16,8 @@ import (
 //
 // The console is local-operator-privileged by definition — whoever holds the
 // terminal on the machine running the server. That's why these live here and
-// not behind an HTTP endpoint: there is no admin role, no admin API to secure,
-// and no way to reach them from a client.
+// not behind an HTTP endpoint: the admin role gates publishing over HTTP, but
+// nothing that changes an account is reachable from a client.
 //
 // Ban is reversible and preferred; delete is not, and takes the user's content
 // with it, so it asks first.
