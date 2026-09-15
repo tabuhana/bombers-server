@@ -55,7 +55,8 @@ const (
 )
 
 // Notify is called when the other party should look at their friends list
-// again — a request arrived, or one they sent was accepted. A function rather
+// again — a request arrived, one they sent was accepted or rejected, or a friend
+// removed them. A function rather
 // than an import of the notify package: a domain reaching into another domain is
 // the thing this codebase does not do. Nil means nobody is listening.
 type Notify func(userID string)

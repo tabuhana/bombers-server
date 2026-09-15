@@ -5,7 +5,7 @@ The Go backend for **Bombers**. See [`PRODUCT.md`](./PRODUCT.md) for the product
 The Tauri/React client lives in a separate repo — this codebase is server-only.
 
 > **The server runs on Linux.** It's developed on a Windows desktop and deployed
-> to Linux — an Arch laptop and an Ubuntu VPS — and that's the only place it's
+> to Linux — an Ubuntu VPS — and that's the only place it's
 > expected to run. Go compiles for Windows and macOS if you ask it to, but
 > nothing here is tested there and the install path assumes a Unix filesystem.
 

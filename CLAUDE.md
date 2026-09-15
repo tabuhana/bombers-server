@@ -61,24 +61,24 @@ The **Bombers Server** — the Go backend half of Bombers. The Tauri/React clien
 
 Scope is the owner and his friends (tens of users, permanently). Don't over-engineer for scale or federation.
 
-**It runs on Linux.** Developed on a Windows desktop, deployed to an Arch laptop and an Ubuntu VPS — that's the whole world. Go will cross-compile elsewhere; nothing there is tested and the install path assumes a Unix filesystem. Don't add platform-specific code for Windows or macOS.
+**It runs on Linux.** Developed on a Windows desktop, deployed to an Ubuntu VPS — that's the whole world. Go will cross-compile elsewhere; nothing there is tested and the install path assumes a Unix filesystem. Don't add platform-specific code for Windows or macOS.
 
 **Self-hosting works but isn't a goal** (2026-08-06). The `bombers` CLI, the setup wizard and the server picker all exist and function — the owner uses them to run his own instance — but making that good *for strangers* stopped being something to invest in. Keep the capability, don't build an audience for it. Every server (official or private) is an **isolated island**: no cross-server anything (per `PRODUCT.md`).
 
-## Stack (per `SERVER.md`, ratify during planning)
+## Stack (per `SERVER.md`, settled in code)
 
 - Go 1.25, module `github.com/tabuhana/bombers-server`
 - HTTP: `net/http` + `chi` router
-- DB: PostgreSQL via `pgx` (or `sqlc` on top). No heavy ORMs.
-- Auth: JWT (`golang-jwt/jwt/v5`) — username+password, short access token + long rotating refresh token
+- DB: PostgreSQL via `pgx`, hand-written SQL (no `sqlc`). No heavy ORMs.
+- Auth: JWT (`golang-jwt/jwt/v5`) — Discord sign-in (no passwords), short access token + long rotating refresh token
 - IDs: ULIDs (`oklog/ulid/v2`) — the client's ULID is the join key for `PublishedItem`
-- Real-time: WebSocket (library TBD — `nhooyr.io/websocket` or `gorilla/websocket`)
-- Migrations: `goose` or `golang-migrate` (TBD)
-- Config: env vars, twelve-factor
+- Real-time: WebSocket via `github.com/coder/websocket` (`rooms/`, `notify/`)
+- Migrations: `goose` (`pressly/goose/v3`) — SQL files embedded in the binary (`migrations/embed.go`) and applied through the library
+- Config: env vars read by `config.Load` (`.env` loaded first); a self-hosted install layers the `config.json` that `bombers setup` writes to the data dir underneath, filling only what the environment leaves unset
 
 ## Layout
 
-Built today: `cmd/bombers/` (wiring) + `internal/{config,store,httpx,logx,types,auth,admin,apitokens,users,discord,settings,friends,profiles,messaging,sync,nodes,nodeshare,packs,activities,releases,presence,rooms,media,console,setup,embeddedpg,migrate,svc}` (`svc` wraps `kardianos/service` for the P5 background-service mode). Planned per `SERVER.md`: `internal/{sharing,events,rooms,realtime}`.
+Built today: `cmd/bombers/` (wiring) + `internal/{config,store,httpx,logx,types,auth,admin,apitokens,users,discord,settings,friends,profiles,messaging,sync,nodes,nodeshare,packs,activities,releases,presence,rooms,notify,media,console,setup,embeddedpg,migrate,backup,svc}` (`svc` wraps `kardianos/service` for the P5 background-service mode). Planned per `SERVER.md`: `internal/{sharing,events,realtime}`.
 
 Each `internal/<domain>` owns its own routes, logic, and queries (typical files: `handler.go` HTTP, `service.go` logic, `store.go` pgx queries). Domains stay loosely coupled — don't reach into another domain's internals; depend on `auth` for tokens/middleware and `httpx`/`types`/`store` for shared plumbing. New routes are registered in `cmd/bombers/main.go` (auth-gated ones inside the `RequireAuth` group).
 
@@ -232,7 +232,7 @@ health-check path, and SIGTERM triggers the graceful shutdown a redeploy needs.
 
 Migrations live in `migrations/` at the repo root, written as `-- +goose Up` / `-- +goose Down` SQL files.
 
-**The easy path — `bombers update`.** The binary embeds the migrations and applies them through the goose LIBRARY (the same path embedded Postgres uses at startup), so updating any database — external/dockerised included — needs no goose CLI, no exported `DATABASE_URL`, and no `-dir` flag. It reads `.env` exactly like the server, applies what's pending, and exits; an unreachable database reports one clean line instead of pgx's address dump. Deliberately NOT run by `start`: applying schema changes should be something you asked for. There is no separate `migrate` COMMAND — migrating is plumbing, so `update` (after a pull) and `setup` (first install) are the two things that do it. `bombers update` is the after-a-pull command: migrate, then serve (`--no-start` when a systemd service owns the process). It must be the FRESHLY BUILT binary — migrations are embedded, so the old binary would apply the old set and report success. The Windows workspace's `./server.sh update` chains containers → build → migrate → start for the same routine.
+**The easy path — `bombers update`.** The binary embeds the migrations and applies them through the goose LIBRARY (the same path embedded Postgres uses at startup), so updating any database — external/dockerised included — needs no goose CLI, no exported `DATABASE_URL`, and no `-dir` flag. It reads `.env` exactly like the server, applies what's pending, and exits; an unreachable database reports one clean line instead of pgx's address dump. Deliberately NOT run by `start`: applying schema changes should be something you asked for. There is no separate `migrate` COMMAND — migrating is plumbing, so `update` (after a pull) and `setup` (first install) are the two things that do it. `bombers update` is the after-a-pull command: migrate, then serve (`--no-start` when a systemd service owns the process). It must be the FRESHLY BUILT binary — migrations are embedded, so the old binary would apply the old set and report success.
 
 The goose CLI remains available for the things a library call can't do (`down`, `status`, `create`):
 

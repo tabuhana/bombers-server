@@ -1,10 +1,12 @@
 // Package messaging owns direct messages: text DMs between two users, persisted
 // indefinitely in Postgres (DMs are not ephemeral; rooms are). v1 is text only —
-// image/file attachments wait for the later S3 phase. Real-time delivery over
-// WebSocket is a separate, later layer (internal/realtime); this domain is the
-// durable REST source of truth that any device pulls history from. You may only
-// message an accepted friend, and every not-allowed case (non-friend, blocked,
-// nonexistent recipient) collapses to the same opaque 404 so you can't probe.
+// image/file attachments wait for the later S3 phase. Live delivery is a nudge,
+// not a copy: once a message is stored, the Notify func below (wired to
+// internal/notify in main) tells the recipient to re-read, and this domain stays
+// the durable REST source of truth that any device pulls history from. You may
+// only message an accepted friend, and every not-allowed case (non-friend,
+// blocked, nonexistent recipient) collapses to the same opaque 404 so you can't
+// probe.
 package messaging
 
 import (

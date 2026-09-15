@@ -16,10 +16,10 @@
 // that something is stale. Fusing them would have meant a room's lifecycle
 // deciding whether your messages arrive.
 //
-// Delivery is best-effort on purpose. A nudge that doesn't land costs a few
-// seconds of staleness — every listener also refreshes on its own schedule and
-// when its screen is opened — so nothing here blocks, queues for later, or
-// retries. A slow client is dropped rather than allowed to hold up a database
+// Delivery is best-effort on purpose. A nudge that doesn't land only leaves
+// something stale — every screen also re-reads when it's opened and after the
+// socket reconnects, and some on a timer too — so nothing here blocks, queues
+// for later, or retries. A slow client is dropped rather than allowed to hold up a database
 // write somewhere else in the process.
 package notify
 
@@ -37,13 +37,13 @@ const (
 	// KindDM — a direct message arrived. `d` carries {"from": "<sender id>"} so a
 	// client showing one conversation can ignore the rest.
 	KindDM = "dm"
-	// KindProfile — someone whose card you may hold changed it: their details,
-	// their avatar or banner, or what their card shares with you (sent to the
-	// viewers before a publish as well as after, so an unshare reaches the person
-	// it was taken from). `d` carries {"from": "<owner id>"} so a client re-reads
-	// that one card rather than every card it holds.
+	// KindProfile — someone whose card you may hold changed it: their details
+	// (PUT /me/profile) or their avatar or banner. Sent to every accepted friend.
+	// `d` carries {"from": "<owner id>"} so a client re-reads that one card rather
+	// than every card it holds.
 	KindProfile = "profile"
-	// KindFriend — a friend request arrived, or one you sent was accepted.
+	// KindFriend — a friend request arrived, one you sent was accepted or
+	// rejected, or a friend removed you.
 	KindFriend = "friend"
 )
 

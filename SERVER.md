@@ -29,7 +29,7 @@ This document defines the server's *shape, contracts, and decisions*. Detailed e
 
 ## Running a server
 
-**On Linux.** Developed on a Windows desktop, deployed to an Arch laptop and an Ubuntu VPS. Nothing else is tested.
+**On Linux.** Developed on a Windows desktop, deployed to an Ubuntu VPS. Nothing else is tested.
 
 Self-hosting *works* — same binary, point the client at it from the login screen's server picker, and it's your own island (no federation — see above). As of 2026-08-06 it stopped being a **goal**: the owner runs Bombers for himself and his friends, so the capability stays and the audience-building doesn't. See `PRODUCT.md` §Who this is for.
 
