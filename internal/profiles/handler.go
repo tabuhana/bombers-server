@@ -35,7 +35,9 @@ const (
 	minCropScale    = 1
 	maxCropScale    = 4
 
-	birthdayLayout = "2006-01-02"
+	// A whole birthday: the one shape an age can be worked out from. Every shape
+	// a birthday may take is in birthdayLayouts.
+	wholeBirthdayLayout = "2006-01-02"
 
 	// Client-branching error codes.
 	errInvalidBirthday   = "invalid_birthday"
@@ -80,7 +82,8 @@ func (h *Handler) nudgeFriends(ctx context.Context, userID string) {
 }
 
 // profileResponse is the JSON-safe view of a self-card. Birthday is emitted as
-// "YYYY-MM-DD" (or null); age is derived from it at read time. updated_at is nil
+// it was stored — as much of the date as the user knows — or null; age is
+// derived from it at read time, and only from a whole date. updated_at is nil
 // for a profile that has never been saved. avatar_url/banner_url are
 // server-relative, versioned serve-URLs (see types.MediaURL) — null until the
 // user uploads that media kind.
@@ -120,8 +123,8 @@ func (h *Handler) attachMedia(ctx context.Context, resp *profileResponse) {
 	resp.BannerURL = banner
 }
 
-// toResponse renders a stored record into the wire shape, deriving age from the
-// birthday relative to `now`.
+// toResponse renders a stored record into the wire shape, deriving age from a
+// whole birthday relative to `now`.
 func toResponse(p *profileRecord, now time.Time) profileResponse {
 	resp := profileResponse{
 		UserID:      p.UserID,
@@ -138,9 +141,12 @@ func toResponse(p *profileRecord, now time.Time) profileResponse {
 		resp.UpdatedAt = &p.UpdatedAt
 	}
 	if p.Birthday != nil {
-		s := p.Birthday.Format(birthdayLayout)
-		resp.Birthday = &s
-		resp.Age = deriveAge(*p.Birthday, now)
+		resp.Birthday = p.Birthday
+		// Only a whole date has an age: without the year there's nothing to count
+		// from, and without the day nobody can say whether this year's has passed.
+		if bd, err := time.Parse(wholeBirthdayLayout, *p.Birthday); err == nil {
+			resp.Age = deriveAge(bd, now)
+		}
 	}
 	return resp
 }
@@ -199,7 +205,7 @@ func (h *Handler) GetMine(w http.ResponseWriter, r *http.Request) {
 
 type updateProfileRequest struct {
 	DisplayName string `json:"display_name"`
-	Birthday    string `json:"birthday"` // "YYYY-MM-DD" or "" to clear
+	Birthday    string `json:"birthday"` // "YYYY-MM-DD", "MM-DD", "YYYY-MM", "YYYY", "MM", or "" to clear
 	Country     string `json:"country"`
 	Timezone    string `json:"timezone"`
 	Visibility  string `json:"visibility"`
@@ -268,13 +274,12 @@ func (req *updateProfileRequest) toRecord(userID string) (*profileRecord, string
 		return nil, errInvalidVisibility
 	}
 
-	var birthday *time.Time
+	var birthday *string // nil when cleared, which stores NULL
 	if bd := strings.TrimSpace(req.Birthday); bd != "" {
-		t, err := time.Parse(birthdayLayout, bd)
-		if err != nil {
+		if !validBirthday(bd) {
 			return nil, errInvalidBirthday
 		}
-		birthday = &t
+		birthday = &bd
 	}
 
 	for _, c := range []*crop{req.AvatarCrop, req.BannerCrop} {
@@ -295,6 +300,34 @@ func (req *updateProfileRequest) toRecord(userID string) (*profileRecord, string
 		AvatarCrop:  req.AvatarCrop,
 		BannerCrop:  req.BannerCrop,
 	}, ""
+}
+
+// birthdayLayouts are the shapes a birthday may take: as much of the date as the
+// user knows. Each is exact — zero-padded, nothing either side — so "1990-3-4"
+// and "3/14" are refused rather than guessed at.
+var birthdayLayouts = []string{
+	wholeBirthdayLayout, // "YYYY-MM-DD"
+	"01-02",             // "MM-DD", no year
+	"2006-01",           // "YYYY-MM"
+	"2006",              // "YYYY"
+	"01",                // "MM"
+}
+
+// validBirthday reports whether s takes one of birthdayLayouts' shapes and names
+// a date that can exist. time.Parse does the calendar: a whole date has to be a
+// real one, and a month and day with no year are checked against year 0, a leap
+// year — so "02-29" passes, since somebody born on one still has a birthday. The
+// one thing it lets through is year 0 itself, which nobody was born in.
+func validBirthday(s string) bool {
+	if strings.HasPrefix(s, "0000") {
+		return false
+	}
+	for _, layout := range birthdayLayouts {
+		if _, err := time.Parse(layout, s); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // valid reports whether a crop can be drawn as sent: a position inside the frame

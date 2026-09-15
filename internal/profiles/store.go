@@ -56,11 +56,12 @@ func (c *crop) orDefault() crop {
 }
 
 // profileRecord is the in-memory view of a profiles row. Birthday is nullable
-// (a user may not set one), hence the pointer.
+// (a user may not set one), hence the pointer; when set it's as much of the date
+// as they know, in one of the shapes birthdayLayouts lists.
 type profileRecord struct {
 	UserID      string
 	DisplayName string
-	Birthday    *time.Time
+	Birthday    *string
 	Country     string
 	Timezone    string
 	Visibility  string

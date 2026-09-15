@@ -173,3 +173,95 @@ func TestProfileResponsesAlwaysCarryCrops(t *testing.T) {
 		})
 	}
 }
+
+// A birthday is as much of the date as the user knows, so every shape that can
+// take is saved exactly as sent, and a blank one clears it. Anything else is
+// refused rather than guessed at — including a date that only looks right.
+func TestABirthdayIsAsMuchOfTheDateAsIsKnown(t *testing.T) {
+	const refused = "refused" // not a birthday, so never a stored value
+	tests := []struct {
+		sent string
+		want string // what's stored: "" for nothing, or refused
+	}{
+		{"1990-03-14", "1990-03-14"}, // a whole date
+		{"2024-02-29", "2024-02-29"}, // Feb 29, in a year that had one
+		{"03-14", "03-14"},           // month and day, no year
+		{"02-29", "02-29"},           // Feb 29 needs no year: somebody was born on one
+		{"1990-03", "1990-03"},       // month and year
+		{"1990", "1990"},             // year only
+		{"03", "03"},                 // month only
+		{"0001-01-01", "0001-01-01"}, // the first year
+		{"9999-12-31", "9999-12-31"}, // and the last
+		{" 03-14\n", "03-14"},        // trimmed first
+		{"", ""},                     // clears it
+		{"   ", ""},                  // and so does whitespace
+
+		{"2023-02-29", refused}, // 2023 had no Feb 29
+		{"02-30", refused},      // and no February has a 30th
+		{"13", refused},
+		{"1990-13", refused},
+		{"0000", refused},     // nobody was born in year 0
+		{"1990-3-4", refused}, // every part is zero-padded
+		{"3/14", refused},
+		{"abc", refused},
+	}
+	for _, tc := range tests {
+		req := updateProfileRequest{Birthday: tc.sent}
+		rec, code := req.toRecord("user-1")
+		switch {
+		case tc.want == refused:
+			if code != errInvalidBirthday {
+				t.Errorf("%q: error = %q, want %q", tc.sent, code, errInvalidBirthday)
+			}
+		case code != "":
+			t.Errorf("%q was refused: %q", tc.sent, code)
+		case tc.want == "":
+			if rec.Birthday != nil {
+				t.Errorf("%q should clear the birthday, not store %q", tc.sent, *rec.Birthday)
+			}
+		case rec.Birthday == nil || *rec.Birthday != tc.want:
+			t.Errorf("%q wasn't stored as %q", tc.sent, tc.want)
+		}
+	}
+}
+
+// A birthday goes back out exactly as it was stored, whole or not, and an age
+// comes only from a whole date: without the year there's nothing to count from,
+// and without the day nobody can say whether this year's birthday has passed.
+func TestAgeComesOnlyFromAWholeBirthday(t *testing.T) {
+	now := time.Date(2026, time.September, 14, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		stored string // "" for a card with no birthday
+		age    string // as it goes out on the wire
+	}{
+		{"1990-09-14", "36"}, // the birthday is today
+		{"1990-09-15", "35"}, // and this one is tomorrow
+		{"09-14", "null"},
+		{"1990-09", "null"},
+		{"1990", "null"},
+		{"09", "null"},
+		{"", "null"},
+	}
+	for _, tc := range tests {
+		rec := profileRecord{UserID: "user-1"}
+		wantBirthday := "null"
+		if tc.stored != "" {
+			rec.Birthday = &tc.stored
+			wantBirthday = `"` + tc.stored + `"`
+		}
+		raw, err := json.Marshal(toResponse(&rec, now))
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		var got map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if string(got["birthday"]) != wantBirthday {
+			t.Errorf("birthday %q went out as %s", tc.stored, got["birthday"])
+		}
+		if string(got["age"]) != tc.age {
+			t.Errorf("birthday %q: age = %s, want %s", tc.stored, got["age"], tc.age)
+		}
+	}
+}
