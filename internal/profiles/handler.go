@@ -1,7 +1,7 @@
-// Package profiles owns the self-card: a user's own published profile (base
-// fields + freeform bio), what friends see when they view you. It is distinct
-// from the about-card (notes a user keeps ABOUT another), which is client-local
-// for now. Age is always derived from birthday, never stored.
+// Package profiles owns the self-card: a user's own published profile, what
+// friends see when they view you. It is distinct from the about-card (notes a
+// user keeps ABOUT another), which is client-local for now. Age is always
+// derived from birthday, never stored.
 package profiles
 
 import (
@@ -21,12 +21,11 @@ import (
 )
 
 const (
-	updateBodyLimit = 1 << 16 // 64 KiB — bios are text, not blobs.
+	updateBodyLimit = 1 << 16 // 64 KiB — a card is a handful of short text fields.
 
 	maxDisplayName = 100
 	maxCountry     = 100
 	maxTimezone    = 64
-	maxBio         = 4000
 	maxNickname    = 100
 	maxCity        = 120
 
@@ -47,7 +46,7 @@ const (
 )
 
 // Notify is called when a change here matters to somebody else — today, when
-// you save your own card or publish its notes, so the friends holding a copy of
+// you save your own card, so the friends holding a copy of
 // it stop showing last month's details. ownerID is whose card changed, so a
 // client re-reads that one person instead of every card it holds. A function
 // rather than an import of the notify package: a domain reaching into another
@@ -92,12 +91,10 @@ type profileResponse struct {
 	Age         *int    `json:"age"`
 	Country     string  `json:"country"`
 	Timezone    string  `json:"timezone"`
-	Bio         string  `json:"bio"`
 	Visibility  string  `json:"visibility"`
 	// Me-card facts. The same for everyone you're linked to — there is no
 	// per-friend choice to make about your own birthday, so any accepted friend
-	// reads these. What you DO choose about, your notes, isn't here: it's
-	// published per viewer (see cards_handler.go).
+	// reads these.
 	Nickname  string  `json:"nickname"`
 	City      string  `json:"city"`
 	AvatarURL *string `json:"avatar_url"`
@@ -131,7 +128,6 @@ func toResponse(p *profileRecord, now time.Time) profileResponse {
 		DisplayName: p.DisplayName,
 		Country:     p.Country,
 		Timezone:    p.Timezone,
-		Bio:         p.Bio,
 		Visibility:  p.Visibility,
 		Nickname:    p.Nickname,
 		City:        p.City,
@@ -206,7 +202,6 @@ type updateProfileRequest struct {
 	Birthday    string `json:"birthday"` // "YYYY-MM-DD" or "" to clear
 	Country     string `json:"country"`
 	Timezone    string `json:"timezone"`
-	Bio         string `json:"bio"`
 	Visibility  string `json:"visibility"`
 	Nickname    string `json:"nickname"`
 	City        string `json:"city"`
@@ -256,14 +251,12 @@ func (req *updateProfileRequest) toRecord(userID string) (*profileRecord, string
 	displayName := strings.TrimSpace(req.DisplayName)
 	country := strings.TrimSpace(req.Country)
 	timezone := strings.TrimSpace(req.Timezone)
-	bio := strings.TrimSpace(req.Bio)
-
 	nickname := strings.TrimSpace(req.Nickname)
 	city := strings.TrimSpace(req.City)
 
 	if len(displayName) > maxDisplayName || len(country) > maxCountry ||
-		len(timezone) > maxTimezone || len(bio) > maxBio ||
-		len(nickname) > maxNickname || len(city) > maxCity {
+		len(timezone) > maxTimezone || len(nickname) > maxNickname ||
+		len(city) > maxCity {
 		return nil, errFieldTooLong
 	}
 
@@ -296,7 +289,6 @@ func (req *updateProfileRequest) toRecord(userID string) (*profileRecord, string
 		Birthday:    birthday,
 		Country:     country,
 		Timezone:    timezone,
-		Bio:         bio,
 		Visibility:  visibility,
 		Nickname:    nickname,
 		City:        city,
@@ -339,8 +331,6 @@ func (h *Handler) GetForUser(w http.ResponseWriter, r *http.Request) {
 	}
 	// No redaction: the facts on a self-card are the same for everyone you're
 	// linked to, and friendship + visibility (checked above) is the whole gate.
-	// What you choose about per person is your NOTES, and those never travel on
-	// this response - they're published per viewer (cards_handler.go).
 	resp := toResponse(p, time.Now())
 	h.attachMedia(r.Context(), &resp)
 	httpx.WriteJSON(w, http.StatusOK, resp)

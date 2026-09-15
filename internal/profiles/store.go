@@ -63,12 +63,8 @@ type profileRecord struct {
 	Birthday    *time.Time
 	Country     string
 	Timezone    string
-	Bio         string
 	Visibility  string
-	// The Me-card facts the sharing UI hands out per person. Nickname and City
-	// are plain text. Notes are NOT here: they're the half you choose about per
-	// person, so they're published per viewer (cards_store.go) rather than
-	// stored once and filtered on the way out.
+	// The Me-card facts: plain text, the same for everyone you're linked to.
 	Nickname string
 	City     string
 	// Pointers because on the way IN, nil is how a save says "leave the framing
@@ -80,7 +76,7 @@ type profileRecord struct {
 }
 
 const getProfileSQL = `
-SELECT user_id, display_name, birthday, country, timezone, bio, visibility,
+SELECT user_id, display_name, birthday, country, timezone, visibility,
        nickname, city,
        avatar_crop_x, avatar_crop_y, avatar_crop_scale,
        banner_crop_x, banner_crop_y, banner_crop_scale,
@@ -92,7 +88,7 @@ WHERE user_id = $1
 func getProfile(ctx context.Context, db dbExecutor, userID string) (*profileRecord, error) {
 	p := profileRecord{AvatarCrop: &crop{}, BannerCrop: &crop{}}
 	err := db.QueryRow(ctx, getProfileSQL, userID).Scan(
-		&p.UserID, &p.DisplayName, &p.Birthday, &p.Country, &p.Timezone, &p.Bio, &p.Visibility,
+		&p.UserID, &p.DisplayName, &p.Birthday, &p.Country, &p.Timezone, &p.Visibility,
 		&p.Nickname, &p.City,
 		&p.AvatarCrop.X, &p.AvatarCrop.Y, &p.AvatarCrop.Scale,
 		&p.BannerCrop.X, &p.BannerCrop.Y, &p.BannerCrop.Scale,
@@ -119,32 +115,31 @@ func getProfile(ctx context.Context, db dbExecutor, userID string) (*profileReco
 // ::real casts pin the argument type, which COALESCE against an integer literal
 // would otherwise infer as integer.
 const upsertProfileSQL = `
-INSERT INTO profiles (user_id, display_name, birthday, country, timezone, bio, visibility,
+INSERT INTO profiles (user_id, display_name, birthday, country, timezone, visibility,
                       nickname, city,
                       avatar_crop_x, avatar_crop_y, avatar_crop_scale,
                       banner_crop_x, banner_crop_y, banner_crop_scale,
                       updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-        COALESCE($10::real, 50), COALESCE($11::real, 50), COALESCE($12::real, 1),
-        COALESCE($13::real, 50), COALESCE($14::real, 50), COALESCE($15::real, 1),
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+        COALESCE($9::real, 50), COALESCE($10::real, 50), COALESCE($11::real, 1),
+        COALESCE($12::real, 50), COALESCE($13::real, 50), COALESCE($14::real, 1),
         NOW())
 ON CONFLICT (user_id) DO UPDATE SET
   display_name      = EXCLUDED.display_name,
   birthday          = EXCLUDED.birthday,
   country           = EXCLUDED.country,
   timezone          = EXCLUDED.timezone,
-  bio               = EXCLUDED.bio,
   visibility        = EXCLUDED.visibility,
   nickname          = EXCLUDED.nickname,
   city              = EXCLUDED.city,
-  avatar_crop_x     = COALESCE($10::real, profiles.avatar_crop_x),
-  avatar_crop_y     = COALESCE($11::real, profiles.avatar_crop_y),
-  avatar_crop_scale = COALESCE($12::real, profiles.avatar_crop_scale),
-  banner_crop_x     = COALESCE($13::real, profiles.banner_crop_x),
-  banner_crop_y     = COALESCE($14::real, profiles.banner_crop_y),
-  banner_crop_scale = COALESCE($15::real, profiles.banner_crop_scale),
+  avatar_crop_x     = COALESCE($9::real, profiles.avatar_crop_x),
+  avatar_crop_y     = COALESCE($10::real, profiles.avatar_crop_y),
+  avatar_crop_scale = COALESCE($11::real, profiles.avatar_crop_scale),
+  banner_crop_x     = COALESCE($12::real, profiles.banner_crop_x),
+  banner_crop_y     = COALESCE($13::real, profiles.banner_crop_y),
+  banner_crop_scale = COALESCE($14::real, profiles.banner_crop_scale),
   updated_at        = NOW()
-RETURNING user_id, display_name, birthday, country, timezone, bio, visibility,
+RETURNING user_id, display_name, birthday, country, timezone, visibility,
           nickname, city,
           avatar_crop_x, avatar_crop_y, avatar_crop_scale,
           banner_crop_x, banner_crop_y, banner_crop_scale,
@@ -165,12 +160,12 @@ func upsertProfile(ctx context.Context, pool *pgxpool.Pool, p *profileRecord) (*
 	avatarX, avatarY, avatarScale := p.AvatarCrop.args()
 	bannerX, bannerY, bannerScale := p.BannerCrop.args()
 	err := pool.QueryRow(ctx, upsertProfileSQL,
-		p.UserID, p.DisplayName, p.Birthday, p.Country, p.Timezone, p.Bio, p.Visibility,
+		p.UserID, p.DisplayName, p.Birthday, p.Country, p.Timezone, p.Visibility,
 		p.Nickname, p.City,
 		avatarX, avatarY, avatarScale,
 		bannerX, bannerY, bannerScale,
 	).Scan(
-		&out.UserID, &out.DisplayName, &out.Birthday, &out.Country, &out.Timezone, &out.Bio, &out.Visibility,
+		&out.UserID, &out.DisplayName, &out.Birthday, &out.Country, &out.Timezone, &out.Visibility,
 		&out.Nickname, &out.City,
 		&out.AvatarCrop.X, &out.AvatarCrop.Y, &out.AvatarCrop.Scale,
 		&out.BannerCrop.X, &out.BannerCrop.Y, &out.BannerCrop.Scale,
