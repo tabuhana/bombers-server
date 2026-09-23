@@ -69,6 +69,11 @@ type catalogEntry struct {
 	// page is meant to help you avoid.
 	Icon  string `json:"icon,omitempty"`
 	Cover string `json:"cover,omitempty"`
+	// RequiresApp is the OLDEST app version this works on, from the manifest's
+	// `requiresApp`. The client refuses to install or update onto anything
+	// older and says so. Empty means no floor — everything published before
+	// the field existed.
+	RequiresApp string `json:"requires_app,omitempty"`
 }
 
 type players struct {
@@ -86,6 +91,7 @@ type manifestFields struct {
 		Players     *players `json:"players"`
 		Icon        string   `json:"icon"`
 		Cover       string   `json:"cover"`
+		RequiresApp string   `json:"requiresApp"`
 	} `json:"manifest"`
 }
 
@@ -119,6 +125,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			entry.Description = fields.Manifest.Description
 			entry.Category = fields.Manifest.Category
 			entry.Players = fields.Manifest.Players
+			entry.RequiresApp = fields.Manifest.RequiresApp
 			// Only advertise art that's really there. A manifest naming a file
 			// it forgot to ship would otherwise have every client fetch a 404
 			// for every listing, forever.

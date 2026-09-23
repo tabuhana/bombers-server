@@ -35,6 +35,11 @@ type CatalogEntry struct {
 	Description string
 	Tags        []string
 	UpdatedAt   time.Time
+	// RequiresApp is the OLDEST app version this works on, from the manifest's
+	// `requiresApp`. The client refuses to install or update onto anything
+	// older and says so. Empty means no floor — everything published before
+	// the field existed.
+	RequiresApp string
 }
 
 // BundleInfo is what publishing extracts from a {manifest, files} bundle for
@@ -85,7 +90,8 @@ SELECT id, name, version,
        COALESCE(bundle->'manifest'->>'icon', ''),
        COALESCE(bundle->'manifest'->>'description', ''),
        COALESCE(bundle->'manifest'->'tags', '[]'::jsonb),
-       updated_at
+       updated_at,
+       COALESCE(bundle->'manifest'->>'requiresApp', '')
 FROM nodes
 ORDER BY name
 `
@@ -102,7 +108,7 @@ func Catalog(ctx context.Context, db dbExecutor) ([]CatalogEntry, error) {
 	for rows.Next() {
 		var e CatalogEntry
 		var rawTags json.RawMessage
-		if err := rows.Scan(&e.ID, &e.Name, &e.Version, &e.Icon, &e.Description, &rawTags, &e.UpdatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &e.Version, &e.Icon, &e.Description, &rawTags, &e.UpdatedAt, &e.RequiresApp); err != nil {
 			return nil, fmt.Errorf("scan catalog entry: %w", err)
 		}
 		// Tags are an optional manifest nicety — a malformed value just means

@@ -72,6 +72,11 @@ type catalogEntry struct {
 	Assets     int      `json:"assets"`
 	AssetBytes int64    `json:"asset_bytes"`
 	Players    *players `json:"players,omitempty"`
+	// RequiresApp is the OLDEST app version this works on, from the manifest's
+	// `requiresApp`. The client refuses to install or update onto anything
+	// older and says so. Empty means no floor — everything published before
+	// the field existed.
+	RequiresApp string `json:"requires_app,omitempty"`
 }
 
 type players struct {
@@ -94,7 +99,8 @@ type manifestFields struct {
 	Themes []struct {
 		Theme map[string]string `json:"theme"`
 	} `json:"themes"`
-	Theme map[string]string `json:"theme"`
+	Theme       map[string]string `json:"theme"`
+	RequiresApp string            `json:"requiresApp"`
 }
 
 // readManifest pulls those keys out of a stored bundle.
@@ -126,7 +132,22 @@ func (m manifestFields) empty() bool {
 
 // swatchKeys are the tokens a thumbnail needs, in painting order: the ground, a
 // panel on it, the accent, and the text colour.
-var swatchKeys = []string{"--bg", "--surface", "--accent", "--text"}
+// swatchSlots are the thumbnail's four bands, in painting order: the ground, a
+// tint on it, the accent, and the text colour.
+//
+// The tricky part is that --surface changed MEANING in app 0.1.6. Before it,
+// the ground was --bg and --surface was the panel sitting on it; after the merge
+// --surface IS the ground and --bar is the tint. Both spellings are in the store
+// and always will be, so the palette tells us which it is: one that still names
+// --bg is the old shape. Guessing wrong swaps two of the four bands, which reads
+// as the wrong theme rather than a broken one — worth the care.
+func swatchSlots(palette map[string]string) [][]string {
+	ground, tint := "--surface", "--bar"
+	if _, legacy := palette["--bg"]; legacy {
+		ground, tint = "--bg", "--surface"
+	}
+	return [][]string{{ground}, {tint, "--surface-2"}, {"--accent"}, {"--text"}}
+}
 
 // packSwatch pulls a listing thumbnail out of a theme pack's first variant,
 // falling back to the legacy single-theme shape. Nil for a sound pack, which has
@@ -139,10 +160,14 @@ func packSwatch(fields manifestFields) []string {
 	if len(palette) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(swatchKeys))
-	for _, k := range swatchKeys {
-		if v, ok := palette[k]; ok && v != "" {
-			out = append(out, v)
+	slots := swatchSlots(palette)
+	out := make([]string, 0, len(slots))
+	for _, slot := range slots {
+		for _, k := range slot {
+			if v, ok := palette[k]; ok && v != "" {
+				out = append(out, v)
+				break
+			}
 		}
 	}
 	return out
@@ -182,6 +207,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		entry.Description = fields.Description
 		entry.Category = fields.Category
 		entry.Players = fields.Players
+		entry.RequiresApp = fields.RequiresApp
 		// The download size matters here: a pack with art is a real download,
 		// and the library should say so before you commit to it.
 		if assets, aerr := ListAssets(r.Context(), h.pool, rec.ID); aerr == nil {

@@ -44,6 +44,11 @@ type catalogResponse struct {
 	Description string    `json:"description"`
 	Tags        []string  `json:"tags"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// RequiresApp is the OLDEST app version this works on, from the manifest's
+	// `requiresApp`. The client refuses to install or update onto anything
+	// older and says so. Empty means no floor — everything published before
+	// the field existed.
+	RequiresApp string `json:"requires_app,omitempty"`
 }
 
 // List → GET /nodes : the store catalog. An empty store is a 200 with an
@@ -65,6 +70,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			Description: e.Description,
 			Tags:        e.Tags,
 			UpdatedAt:   e.UpdatedAt,
+			RequiresApp: e.RequiresApp,
 		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"nodes": out})
