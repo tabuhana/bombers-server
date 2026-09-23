@@ -267,9 +267,13 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", m.ContentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(m.SizeBytes, 10))
 	w.Header().Set("ETag", etag)
-	// Private (per-viewer authorization) + revalidate-friendly. The profile's
-	// ?v= cache-buster handles replaces; the ETag handles everything else.
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	// NOT cached by the client's webview, deliberately. The app keeps its own
+	// copy of downloaded media on disk (media-cache/), which is what Settings >
+	// Storage measures and what its Clear empties. Letting the webview keep a
+	// second copy would put bytes on the user's disk that the app cannot see,
+	// cannot count and cannot clear — so the number it shows would be wrong.
+	// The ETag stays for anything that does revalidate.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, obj); err != nil {
 		// Headers are flushed; nothing to send the client. Usually a canceled
