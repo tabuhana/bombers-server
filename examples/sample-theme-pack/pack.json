@@ -1,0 +1,14 @@
+{
+  "id": "sample-theme-pack",
+  "name": "Sample Theme Pack",
+  "version": "0.1.0",
+  "author": "you",
+  "description": "One look \u2014 the shape a published THEME pack takes. No files at all.",
+  "kind": "theme",
+  "theme": {
+    "--accent": "#c98b5e",
+    "--surface": "#1c1a18",
+    "--text": "#efe7de",
+    "--radius-md": "10px"
+  }
+}

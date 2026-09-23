@@ -7,8 +7,9 @@ import (
 )
 
 // A pack has no source — pack.json is the whole bundle — so readPackAssets must
-// pick up ONLY sounds/** and a top-level wallpaper, and skip everything else.
-func TestReadPackAssetsPicksSoundsAndWallpaper(t *testing.T) {
+// pick up ONLY sounds/** and skip everything else. A top-level wallpaper used to
+// count; packs carry no background now, so it is skipped like any other stray.
+func TestReadPackAssetsPicksSoundsOnly(t *testing.T) {
 	dir := t.TempDir()
 	write := func(rel, body string) {
 		full := filepath.Join(dir, filepath.FromSlash(rel))
@@ -18,12 +19,12 @@ func TestReadPackAssetsPicksSoundsAndWallpaper(t *testing.T) {
 		}
 	}
 	write("pack.json", `{"id":"p","name":"P"}`)
-	write("sounds/dm.mp3", "MP3")
-	write("sounds/button-click.ogg", "OGG")
-	write("wallpaper.png", "PNG")
+	write("sounds/ff14-chirp.mp3", "MP3")
+	write("sounds/soft-tick.ogg", "OGG")
+	write("wallpaper.png", "PNG")         // skipped: packs carry no background
 	write("readme.md", "notes")           // skipped
 	write("theme.psd", "source junk")     // skipped
-	write("extra/whatever.png", "nested") // skipped: not sounds/, not top-level wallpaper
+	write("extra/whatever.png", "nested") // skipped: not under sounds/
 
 	assets, err := readPackAssets(dir)
 	if err != nil {
@@ -33,17 +34,17 @@ func TestReadPackAssetsPicksSoundsAndWallpaper(t *testing.T) {
 	for _, a := range assets {
 		got[a.path] = a.contentType
 	}
-	if len(got) != 3 {
-		t.Fatalf("expected 3 assets, got %d: %v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 assets, got %d: %v", len(got), got)
 	}
-	if got["sounds/dm.mp3"] != "audio/mpeg" {
-		t.Errorf("dm.mp3 content type: %q", got["sounds/dm.mp3"])
+	if got["sounds/ff14-chirp.mp3"] != "audio/mpeg" {
+		t.Errorf("mp3 content type: %q", got["sounds/ff14-chirp.mp3"])
 	}
-	if got["sounds/button-click.ogg"] != "audio/ogg" {
-		t.Errorf("ogg content type: %q", got["sounds/button-click.ogg"])
+	if got["sounds/soft-tick.ogg"] != "audio/ogg" {
+		t.Errorf("ogg content type: %q", got["sounds/soft-tick.ogg"])
 	}
-	if _, ok := got["wallpaper.png"]; !ok {
-		t.Error("top-level wallpaper should be picked up")
+	if _, ok := got["wallpaper.png"]; ok {
+		t.Error("a top-level wallpaper should be skipped")
 	}
 	if _, ok := got["readme.md"]; ok {
 		t.Error("readme should be skipped")

@@ -11,20 +11,22 @@ import (
 	"github.com/tabuhana/bombers-server/internal/packs"
 )
 
-// Publishing look-and-feel PACKS from the console — a theme, a sound set, a
-// wallpaper, or any mix. Same operator-curated model as games.
+// Publishing look-and-feel PACKS from the console. A pack is ONE kind — a THEME
+// (colours, pure values) or a set of SOUNDS (clips) — never both, and never a
+// wallpaper: a background belongs to the person using the client and nothing
+// downloaded reaches it. Same operator-curated model as games.
 //
 // A pack is a FOLDER:
 //
 //     midnight/
-//       pack.json          id, name, author, description, and the theme's vars
+//       pack.json          id, name, author, description, and a theme's vars
 //       sounds/
-//         dm.mp3           named after the sound SLOTS (button-click, dm, …)
-//         button-click.mp3
-//       wallpaper.png      optional
+//         ff14-chirp.mp3   a sound pack's clips, named whatever suits them
+//         soft-tick.ogg
 //
 // pack.json is the bundle the client reads (theme variables live inside it);
-// sounds/ and wallpaper.* are uploaded byte-for-byte to object storage.
+// sounds/ is uploaded byte-for-byte to object storage. A clip's NAME means
+// nothing to either side — the client assigns clips to sounds by its own wiring.
 //
 // This is one of TWO ways into the same operation — the other is the admin-
 // gated POST /packs + PUT /packs/{id}/assets/*, for publishing from the client.
@@ -81,7 +83,7 @@ func runUnpublishPack(ctx context.Context, c *Console, args []string) error {
 func runPublishPack(ctx context.Context, c *Console, args []string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(c.out, "  usage: publish-pack <folder>")
-		fmt.Fprintln(c.out, "  the folder holds pack.json, an optional sounds/ folder, and an optional wallpaper")
+		fmt.Fprintln(c.out, "  the folder holds pack.json and, for a sound pack, a sounds/ folder")
 		return nil
 	}
 	dir := strings.Trim(strings.Join(args, " "), `"`)
@@ -152,9 +154,10 @@ func runPublishPack(ctx context.Context, c *Console, args []string) error {
 	return nil
 }
 
-// readPackAssets collects sounds/** and a wallpaper.* from a pack folder. Unlike
-// a game, a pack has NO source — pack.json is the whole bundle — so everything
-// else is an asset (or ignored).
+// readPackAssets collects sounds/** from a pack folder. Unlike a game, a pack has
+// NO source — pack.json is the whole bundle — so everything else is an asset (or
+// ignored). A top-level wallpaper.* used to be collected too; packs don't carry
+// backgrounds any more, so it is skipped like any other stray file.
 func readPackAssets(dir string) ([]pendingAsset, error) {
 	var assets []pendingAsset
 	root := filepath.Clean(dir)
@@ -175,11 +178,9 @@ func readPackAssets(dir string) ([]pendingAsset, error) {
 			return nil // the bundle, carried separately
 		}
 
-		// Only sounds/** and a top-level wallpaper are meaningful. Anything else
-		// (a readme, a source .psd) is skipped rather than uploaded.
-		isSound := strings.HasPrefix(rel, "sounds/")
-		isWallpaper := !strings.Contains(rel, "/") && strings.HasPrefix(strings.ToLower(rel), "wallpaper.")
-		if !isSound && !isWallpaper {
+		// Only sounds/** is meaningful. Anything else (a readme, a source .psd,
+		// a leftover wallpaper) is skipped rather than uploaded.
+		if !strings.HasPrefix(rel, "sounds/") {
 			return nil
 		}
 		if !packs.ValidAssetPath(rel) {

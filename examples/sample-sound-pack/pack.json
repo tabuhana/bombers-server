@@ -1,0 +1,8 @@
+{
+  "id": "sample-sound-pack",
+  "name": "Sample Sound Pack",
+  "version": "0.1.0",
+  "author": "you",
+  "description": "A set of clips \u2014 the shape a published SOUND pack takes.",
+  "kind": "sound"
+}
