@@ -45,6 +45,11 @@ const (
 	// KindFriend — a friend request arrived, one you sent was accepted or
 	// rejected, or a friend removed you.
 	KindFriend = "friend"
+	// KindRecord — a node put something in front of you, changed it, withdrew
+	// it, or somebody answered one of yours (internal/noderecords). `d` carries
+	// {"node": "<node id>", "from": "<writer id>"}, so the client wakes the one
+	// node concerned instead of every node that has ever sent anything.
+	KindRecord = "record"
 )
 
 // sendQueue bounds one connection's backlog. These are tiny and infrequent, so

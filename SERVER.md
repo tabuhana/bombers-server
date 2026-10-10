@@ -205,7 +205,7 @@ bombers-server/
 │   ├── nodes/                 node store: catalog, bundle download, publish
 │   ├── sharing/               shares, permission checks
 │   ├── profiles/              about-cards + self-cards + visibility
-│   ├── events/                events + invites
+│   ├── noderecords/           a node's records + the responses to them
 │   ├── messaging/             DM persistence + delivery
 │   ├── rooms/                 ephemeral room lifecycle
 │   ├── realtime/              WebSocket hub, presence, indicators

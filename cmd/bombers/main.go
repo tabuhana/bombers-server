@@ -38,6 +38,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/media"
 	"github.com/tabuhana/bombers-server/internal/messaging"
 	"github.com/tabuhana/bombers-server/internal/migrate"
+	"github.com/tabuhana/bombers-server/internal/noderecords"
 	"github.com/tabuhana/bombers-server/internal/nodes"
 	"github.com/tabuhana/bombers-server/internal/nodeshare"
 	"github.com/tabuhana/bombers-server/internal/notify"
@@ -428,6 +429,12 @@ func buildAndServe() (*app, error) {
 	syncHandler := sync.NewHandler(pool)
 	nodesHandler := nodes.NewHandler(pool)
 	nodeshareHandler := nodeshare.NewHandler(pool)
+	// The people axis: a record and its answers. The nudge names the NODE as
+	// well as the writer, since the client has to wake one node and not all of
+	// them.
+	noderecordsHandler := noderecords.NewHandler(pool, func(userIDs []string, nodeID, fromID string) {
+		notifyHub.SendMany(userIDs, notify.KindRecord, map[string]string{"node": nodeID, "from": fromID})
+	})
 	mediaHandler := media.NewHandler(pool, storage, profileNudge)
 	roomsHandler := rooms.NewHandler(pool, issuer)
 	activitiesHandler := activities.NewHandler(pool, storage)
@@ -578,6 +585,16 @@ func buildAndServe() (*app, error) {
 		r.Post("/nodes/send", nodeshareHandler.Send)
 		r.Get("/nodes/received", nodeshareHandler.ListReceived)
 		r.Delete("/nodes/received/{id}", nodeshareHandler.Dismiss)
+		// The people axis: a node's records and the answers to them. Its own
+		// path rather than under /nodes, which is the store and the transfer
+		// inbox — different cargo. Reads are scoped to one node by ?node=.
+		r.Post("/node-records", noderecordsHandler.Create)
+		r.Get("/node-records/received", noderecordsHandler.ListReceived)
+		r.Get("/node-records/sent", noderecordsHandler.ListSent)
+		r.Put("/node-records/{id}", noderecordsHandler.Update)
+		r.Delete("/node-records/{id}", noderecordsHandler.Withdraw)
+		r.Put("/node-records/{id}/response", noderecordsHandler.Respond)
+		r.Delete("/node-records/{id}/response", noderecordsHandler.Unrespond)
 		// Profile media (avatar/banner): raw image bytes in, proxied bytes
 		// out. Serving is friendship + profile-visibility gated pass-through.
 		r.Put("/me/media/{kind}", mediaHandler.Upload)
