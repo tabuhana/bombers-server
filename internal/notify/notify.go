@@ -42,9 +42,14 @@ import (
 // screen in the client re-reads something when it hears it, and a kind nobody
 // listens for is just noise on a wire.
 const (
-	// KindDM — something happened to a direct message: it arrived, was edited, or
-	// was deleted. `d` carries {"op": "new"|"edit"|"delete", "from": "<sender id>",
-	// "message": {...}} and, on "new" only, the sender's "nonce" if they gave one.
+	// KindDM — something happened to a direct message: it arrived, was edited, was
+	// deleted, was pinned or unpinned, or had a reaction added or removed. `d` carries
+	// {"op": "new"|"edit"|"delete"|"pin"|"react", "from": "<sender id>", "message":
+	// {...}} and, on "new" only, the sender's "nonce" if they gave one. `from` is
+	// always the message's author, whoever acted. A pin and an unpin are both "pin",
+	// and a reaction added and one removed both "react": the message says which, by
+	// its pinned_at or its reactions. The message is as the RECEIVING person sees it
+	// (their `me` on each reaction), so each of the two gets a frame of their own.
 	// Sent to both people in the conversation, so the sender's other windows and
 	// devices stay in step. The only kind that carries content (see above).
 	KindDM = "dm"

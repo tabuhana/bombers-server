@@ -24,8 +24,12 @@ type beginFunc func(ctx context.Context) (pgx.Tx, error)
 
 // messageRecord is the in-memory view of a messages row. EditedAt and DeletedAt
 // are nil until set; a deleted message keeps its row (a tombstone) with Body "".
-// Nonce is the sender's idempotency key and is only ever written: it is not in
-// messageColumns, so no read fills it in.
+// Nonce is the sender's idempotency key. It IS stored, behind the partial unique
+// index messages_sender_recipient_nonce_idx, and findByNonceSQL matches on it, but
+// it is write-only in the sense that matters here: it is not in messageColumns, so no
+// SELECT returns it and no read fills this field in. ReplyToID is the message this one
+// answers, set at insert and never changed; PinnedAt is nil until a participant
+// pins it. pinned_by is written with the pin and never read, so it has no field.
 type messageRecord struct {
 	ID          string
 	Seq         int64
@@ -35,13 +39,15 @@ type messageRecord struct {
 	CreatedAt   time.Time
 	EditedAt    *time.Time
 	DeletedAt   *time.Time
+	ReplyToID   *string
+	PinnedAt    *time.Time
 	Nonce       string
 }
 
 // messageColumns is every SELECT's and RETURNING's column list, in the order
 // scanMessage reads them. One list, so a column added to the shape is added in
 // one place and a query can't return a message with a field missing.
-const messageColumns = `id, seq, sender_id, recipient_id, body, created_at, edited_at, deleted_at`
+const messageColumns = `id, seq, sender_id, recipient_id, body, created_at, edited_at, deleted_at, reply_to_id, pinned_at`
 
 // rowScanner is what pgx.Row and pgx.Rows share.
 type rowScanner interface {
@@ -52,7 +58,7 @@ type rowScanner interface {
 // one place the order is written down in Go, shared by every scan that reads a
 // whole message, alone or as part of a wider row.
 func messageDests(m *messageRecord) []any {
-	return []any{&m.ID, &m.Seq, &m.SenderID, &m.RecipientID, &m.Body, &m.CreatedAt, &m.EditedAt, &m.DeletedAt}
+	return []any{&m.ID, &m.Seq, &m.SenderID, &m.RecipientID, &m.Body, &m.CreatedAt, &m.EditedAt, &m.DeletedAt, &m.ReplyToID, &m.PinnedAt}
 }
 
 func scanMessage(row rowScanner) (messageRecord, error) {
@@ -101,12 +107,19 @@ func writeSeq(ctx context.Context, begin beginFunc, write func(tx dbExecutor) (*
 }
 
 // errNoMessage means no message matched: it does not exist, it is already
-// deleted, or the caller is not its sender. The three are one answer on purpose.
+// deleted, or the caller is not its sender (or, for a pin, not a party to it). The
+// cases are one answer on purpose.
 var errNoMessage = errors.New("message not found")
+
+// errPinLimit means the conversation already holds maxPins pinned messages.
+var errPinLimit = errors.New("too many pins")
 
 // insertMessageSQL stores a message. An empty nonce is stored as NULL, never as
 // "": the unique index is partial on NOT NULL, and an empty string is a value, so
-// it would make every nonce-less send after the first collide.
+// it would make every nonce-less send after the first collide. reply_to_id is the
+// one place a message names another, and it is written here and nowhere else: no
+// UPDATE in this file sets it, which is what makes it immutable. The caller has
+// already proved the target belongs to this same pair (replyTargetInPair).
 //
 // created_at is clock_timestamp(), not the column default now(). now() is the
 // instant the TRANSACTION started, and this one waits on seqLockKey before it gets
@@ -116,13 +129,13 @@ var errNoMessage = errors.New("message not found")
 // this statement runs, which is inside the lock and before the commit, so
 // created_at order is seq order is commit order.
 const insertMessageSQL = `
-INSERT INTO messages (id, sender_id, recipient_id, body, created_at, nonce)
-VALUES ($1, $2, $3, $4, clock_timestamp(), NULLIF($5::text, ''))
+INSERT INTO messages (id, sender_id, recipient_id, body, created_at, nonce, reply_to_id)
+VALUES ($1, $2, $3, $4, clock_timestamp(), NULLIF($5::text, ''), $6::text)
 RETURNING ` + messageColumns + `
 `
 
 func insertMessage(ctx context.Context, db dbExecutor, m *messageRecord) (*messageRecord, error) {
-	out, err := scanMessage(db.QueryRow(ctx, insertMessageSQL, m.ID, m.SenderID, m.RecipientID, m.Body, m.Nonce))
+	out, err := scanMessage(db.QueryRow(ctx, insertMessageSQL, m.ID, m.SenderID, m.RecipientID, m.Body, m.Nonce, m.ReplyToID))
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
 	}
@@ -223,13 +236,22 @@ func editMessage(ctx context.Context, db dbExecutor, id, senderID, body string) 
 
 // deleteMessageSQL turns a message into a tombstone. The body is overwritten, not
 // flagged: a delete has to delete the words, because a flag is a promise that
-// whoever reads the table next honours it.
+// whoever reads the table next honours it. The pin and the reply link go with
+// them: a tombstone is not pinned, and what it answered was part of what it said.
+// A message that OTHERS replied to keeps those replies, whose preview then reports
+// it deleted.
 const deleteMessageSQL = `
 UPDATE messages
-SET body = '', deleted_at = now(), seq = nextval('messages_seq')
+SET body = '', deleted_at = now(), pinned_at = NULL, pinned_by = NULL, reply_to_id = NULL,
+    seq = nextval('messages_seq')
 WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
 RETURNING ` + messageColumns + `
 `
+
+// deleteReactionsSQL removes every reaction on a message. A tombstone has nothing
+// to react to, and other people's reactions to words that no longer exist are not
+// something to keep around unseen.
+const deleteReactionsSQL = `DELETE FROM message_reactions WHERE message_id = $1`
 
 func deleteMessage(ctx context.Context, db dbExecutor, id, senderID string) (*messageRecord, error) {
 	out, err := scanMessage(db.QueryRow(ctx, deleteMessageSQL, id, senderID))
@@ -239,7 +261,370 @@ func deleteMessage(ctx context.Context, db dbExecutor, id, senderID string) (*me
 	if err != nil {
 		return nil, fmt.Errorf("delete message: %w", err)
 	}
+	if _, err := db.Exec(ctx, deleteReactionsSQL, id); err != nil {
+		return nil, fmt.Errorf("delete reactions: %w", err)
+	}
 	return &out, nil
+}
+
+// replyTargetSQL asks whether message $3 belongs to the conversation of $1 and $2.
+// It is the check that makes a reply safe: reply_to resolves to a preview of the
+// original at read time, so a reply to a message of somebody else's thread would be
+// a way to read one line of a conversation the caller is not in. Deleted messages
+// pass on purpose: a reply to a message deleted a second ago is not an error, and
+// its preview just reports the deletion.
+const replyTargetSQL = `SELECT EXISTS (SELECT 1 FROM messages WHERE id = $3 AND ` + conversationPairSQL + `)`
+
+func replyTargetInPair(ctx context.Context, db dbExecutor, a, b, id string) (bool, error) {
+	var ok bool
+	if err := db.QueryRow(ctx, replyTargetSQL, a, b, id).Scan(&ok); err != nil {
+		return false, fmt.Errorf("check reply target: %w", err)
+	}
+	return ok, nil
+}
+
+// participantMessageSQL reads a live message the caller ($2) is a party to, as
+// sender or as recipient. A pin belongs to the conversation, not to the author, so
+// this is scoped to the two people and not to the sender; a message that is missing,
+// deleted or between two other people is zero rows, one answer.
+const participantMessageSQL = `
+SELECT ` + messageColumns + `
+FROM messages
+WHERE id = $1 AND (sender_id = $2 OR recipient_id = $2) AND deleted_at IS NULL
+`
+
+func participantMessage(ctx context.Context, db dbExecutor, id, userID string) (*messageRecord, error) {
+	out, err := scanMessage(db.QueryRow(ctx, participantMessageSQL, id, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNoMessage
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find message: %w", err)
+	}
+	return &out, nil
+}
+
+// countPinsSQL counts the pins of the conversation of $1 and $2. A tombstone's pin
+// is cleared when it is deleted, so every row counted is a live pin.
+const countPinsSQL = `SELECT COUNT(*)::bigint FROM messages WHERE ` + conversationPairSQL + ` AND pinned_at IS NOT NULL`
+
+// pinMessageSQL sets a pin and draws a fresh seq, so the pin reaches a client that
+// was offline through the catch-up feed like any other change. pinned_at is
+// clock_timestamp() for the reason created_at is: it is read inside the seq lock,
+// so the order pins are shown in is the order they committed. pinned_at IS NULL is
+// in the WHERE so this statement can never re-pin, and so never draws a seq for a
+// repeat.
+const pinMessageSQL = `
+UPDATE messages
+SET pinned_at = clock_timestamp(), pinned_by = $2, seq = nextval('messages_seq')
+WHERE id = $1 AND pinned_at IS NULL AND deleted_at IS NULL
+RETURNING ` + messageColumns + `
+`
+
+// unpinMessageSQL clears a pin and draws a fresh seq. pinned_at IS NOT NULL keeps a
+// repeat from drawing one.
+const unpinMessageSQL = `
+UPDATE messages
+SET pinned_at = NULL, pinned_by = NULL, seq = nextval('messages_seq')
+WHERE id = $1 AND pinned_at IS NOT NULL AND deleted_at IS NULL
+RETURNING ` + messageColumns + `
+`
+
+// pinMessage pins message id for userID, a party to it. It reports whether it
+// changed anything: pinning what is already pinned is a success that writes nothing
+// and draws no seq, because a repeat is not news. The lookup comes before the
+// UPDATE for the same reason insertOnce's does, and the cap is counted here, so
+// both must run inside writeSeq: its lock is what keeps two pins from both seeing
+// room for one more.
+func pinMessage(ctx context.Context, db dbExecutor, id, userID string) (*messageRecord, bool, error) {
+	cur, err := participantMessage(ctx, db, id, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	if cur.PinnedAt != nil {
+		return cur, false, nil
+	}
+	var pinned int64
+	if err := db.QueryRow(ctx, countPinsSQL, cur.SenderID, cur.RecipientID).Scan(&pinned); err != nil {
+		return nil, false, fmt.Errorf("count pins: %w", err)
+	}
+	if pinned >= maxPins {
+		return nil, false, errPinLimit
+	}
+	out, err := scanMessage(db.QueryRow(ctx, pinMessageSQL, id, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, errNoMessage
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("pin message: %w", err)
+	}
+	return &out, true, nil
+}
+
+// unpinMessage clears the pin on message id for userID, a party to it, reporting
+// whether it changed anything. Like pinMessage it must run inside writeSeq, and
+// unpinning what is not pinned writes nothing.
+func unpinMessage(ctx context.Context, db dbExecutor, id, userID string) (*messageRecord, bool, error) {
+	cur, err := participantMessage(ctx, db, id, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	if cur.PinnedAt == nil {
+		return cur, false, nil
+	}
+	out, err := scanMessage(db.QueryRow(ctx, unpinMessageSQL, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, errNoMessage
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("unpin message: %w", err)
+	}
+	return &out, true, nil
+}
+
+// listPinsSQL is a conversation's pins, newest pinned first. The partial index
+// messages_pinned_idx holds only pinned rows, so this and countPinsSQL read the
+// handful of pins on the whole server rather than any conversation's history.
+// LIMIT is the cap, so the list is bounded by construction.
+const listPinsSQL = `
+SELECT ` + messageColumns + `
+FROM messages
+WHERE ` + conversationPairSQL + `
+  AND pinned_at IS NOT NULL AND deleted_at IS NULL
+ORDER BY pinned_at DESC, id DESC
+LIMIT $3
+`
+
+func listPins(ctx context.Context, db dbExecutor, a, b string) ([]messageRecord, error) {
+	rows, err := db.Query(ctx, listPinsSQL, a, b, maxPins)
+	if err != nil {
+		return nil, fmt.Errorf("list pins: %w", err)
+	}
+	defer rows.Close()
+
+	var out []messageRecord
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan pin: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pins: %w", err)
+	}
+	return out, nil
+}
+
+// errReactionLimit means the message already holds as many distinct emoji
+// (maxReactionEmoji), or as many reactions in all (maxReactions), as it may.
+var errReactionLimit = errors.New("too many reactions")
+
+// reactionStateSQL is what the cap and the repeat check need to know about the
+// reactions on message $1 when person $3 reacts with emoji $2: how many there are in
+// all, how many distinct emoji, whether anyone has used this emoji on the message,
+// and whether $3 has. An aggregate with no GROUP BY is always exactly one row, and
+// bool_or of nothing is NULL, which COALESCE turns into false.
+const reactionStateSQL = `
+SELECT COUNT(*)::bigint,
+       COUNT(DISTINCT emoji)::bigint,
+       COALESCE(bool_or(emoji = $2::text), false),
+       COALESCE(bool_or(emoji = $2::text AND user_id = $3::text), false)
+FROM message_reactions
+WHERE message_id = $1
+`
+
+// reactionState is reactionStateSQL's row.
+type reactionState struct {
+	Total    int64
+	Distinct int64
+	Used     bool // anyone has used this emoji on the message
+	Mine     bool // the asker has
+}
+
+func loadReactionState(ctx context.Context, db dbExecutor, messageID, userID, emoji string) (reactionState, error) {
+	var s reactionState
+	if err := db.QueryRow(ctx, reactionStateSQL, messageID, emoji, userID).Scan(&s.Total, &s.Distinct, &s.Used, &s.Mine); err != nil {
+		return reactionState{}, fmt.Errorf("load reaction state: %w", err)
+	}
+	return s, nil
+}
+
+// insertReactionSQL adds one reaction. The primary key is (message_id, user_id,
+// emoji), so the same person adding the same emoji twice would be a unique
+// violation; addReaction never sends that, because it looks first, inside writeSeq's
+// lock, and treats a repeat as nothing to do. created_at is the column's
+// clock_timestamp(), read inside that lock, so the order emoji are shown in is the
+// order they committed.
+const insertReactionSQL = `INSERT INTO message_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3)`
+
+const removeReactionSQL = `DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3`
+
+// touchMessageSQL draws a fresh seq for a live message without changing any column
+// of its own. A reaction is a row in another table, so nothing about the message
+// moved; the new seq is what puts it back in the catch-up feed, which is the only
+// way a client that was offline learns of the reaction. Like every other statement
+// that draws one it must run inside writeSeq.
+const touchMessageSQL = `
+UPDATE messages
+SET seq = nextval('messages_seq')
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING ` + messageColumns + `
+`
+
+func touchMessage(ctx context.Context, db dbExecutor, id string) (*messageRecord, error) {
+	out, err := scanMessage(db.QueryRow(ctx, touchMessageSQL, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNoMessage
+	}
+	if err != nil {
+		return nil, fmt.Errorf("touch message: %w", err)
+	}
+	return &out, nil
+}
+
+// addReaction records userID's reaction to message id, a live message they are a party
+// to, and reports whether it changed anything: reacting with an emoji already used
+// is a success that writes nothing and draws no seq, because a repeat is not news.
+// The caps apply only to a reaction that would be new, so a repeat at the cap is
+// still just a success. The lookups come before the writes and the counts are read
+// here, so all of it must run inside writeSeq: its lock is what keeps two reactions
+// from both seeing room for one more.
+func addReaction(ctx context.Context, db dbExecutor, id, userID, emoji string) (*messageRecord, bool, error) {
+	cur, err := participantMessage(ctx, db, id, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	state, err := loadReactionState(ctx, db, id, userID, emoji)
+	if err != nil {
+		return nil, false, err
+	}
+	if state.Mine {
+		return cur, false, nil
+	}
+	if state.Total >= maxReactions || (!state.Used && state.Distinct >= maxReactionEmoji) {
+		return nil, false, errReactionLimit
+	}
+	if _, err := db.Exec(ctx, insertReactionSQL, id, userID, emoji); err != nil {
+		return nil, false, fmt.Errorf("add reaction: %w", err)
+	}
+	out, err := touchMessage(ctx, db, id)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// removeReaction takes userID's reaction off message id, a live message they are a
+// party to, reporting whether it changed anything. Removing one that is not there is
+// a success that writes nothing and draws no seq. Like addReaction it runs inside
+// writeSeq.
+func removeReaction(ctx context.Context, db dbExecutor, id, userID, emoji string) (*messageRecord, bool, error) {
+	cur, err := participantMessage(ctx, db, id, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	state, err := loadReactionState(ctx, db, id, userID, emoji)
+	if err != nil {
+		return nil, false, err
+	}
+	if !state.Mine {
+		return cur, false, nil
+	}
+	if _, err := db.Exec(ctx, removeReactionSQL, id, userID, emoji); err != nil {
+		return nil, false, fmt.Errorf("remove reaction: %w", err)
+	}
+	out, err := touchMessage(ctx, db, id)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// replyRecord is what a reply points at, read at the moment the reply is: the
+// reply's own id, and the original's id, sender, body and whether it was deleted.
+type replyRecord struct {
+	MessageID  string
+	OriginalID string
+	SenderID   string
+	Body       string
+	Deleted    bool
+}
+
+// replyPreviewsSQL resolves, for the messages in $1, the original each one answers.
+// It is read every time and never stored, so an edit of the original shows through.
+// The join insists the original is in the SAME conversation as the reply: the write
+// path already guarantees it, and checking again here means the preview cannot leak
+// a line from another thread even if some row were ever wrong.
+const replyPreviewsSQL = `
+SELECT m.id, r.id, r.sender_id, r.body, r.deleted_at IS NOT NULL
+FROM messages m
+JOIN messages r ON r.id = m.reply_to_id
+WHERE m.id = ANY($1)
+  AND ((r.sender_id = m.sender_id AND r.recipient_id = m.recipient_id)
+    OR (r.sender_id = m.recipient_id AND r.recipient_id = m.sender_id))
+`
+
+func loadReplies(ctx context.Context, db dbExecutor, messageIDs []string) (map[string]replyRecord, error) {
+	rows, err := db.Query(ctx, replyPreviewsSQL, messageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load replies: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]replyRecord{}
+	for rows.Next() {
+		var r replyRecord
+		if err := rows.Scan(&r.MessageID, &r.OriginalID, &r.SenderID, &r.Body, &r.Deleted); err != nil {
+			return nil, fmt.Errorf("scan reply: %w", err)
+		}
+		out[r.MessageID] = r
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate replies: %w", err)
+	}
+	return out, nil
+}
+
+// reactionRecord is one emoji on one message: how many people added it, and
+// whether the person asking is one of them.
+type reactionRecord struct {
+	MessageID string
+	Emoji     string
+	Count     int64
+	Me        bool
+}
+
+// reactionsSQL tallies the reactions on the messages in $1 as seen by $2. Within a
+// message the emoji come in the order each was first used, which is the order a
+// client lays the bar out in.
+const reactionsSQL = `
+SELECT message_id, emoji, COUNT(*)::bigint, bool_or(user_id = $2::text)
+FROM message_reactions
+WHERE message_id = ANY($1)
+GROUP BY message_id, emoji
+ORDER BY message_id, MIN(created_at), emoji
+`
+
+func loadReactions(ctx context.Context, db dbExecutor, messageIDs []string, viewerID string) ([]reactionRecord, error) {
+	rows, err := db.Query(ctx, reactionsSQL, messageIDs, viewerID)
+	if err != nil {
+		return nil, fmt.Errorf("load reactions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []reactionRecord
+	for rows.Next() {
+		var r reactionRecord
+		if err := rows.Scan(&r.MessageID, &r.Emoji, &r.Count, &r.Me); err != nil {
+			return nil, fmt.Errorf("scan reaction: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reactions: %w", err)
+	}
+	return out, nil
 }
 
 // errNoCursor means the message id a client paged from is not one it may page
@@ -344,6 +729,72 @@ func listConversation(ctx context.Context, db dbExecutor, a, b string, limit int
 	return out, nil
 }
 
+// listAroundOlderSQL and listAroundNewerSQL are the two halves of a page centred on a
+// position: $3/$4 is the (created_at, id) of the anchor, $5 the number of rows to read.
+// Older is everything AT OR BEFORE the anchor, newest first, so a live anchor is the
+// first row; newer is everything strictly after it, oldest first. Each is one keyset
+// read on (created_at, id) served by the pair's indexes, never seq, and each leaves
+// tombstones out like history. A tombstone anchor positions the page and is simply not
+// among the rows.
+const listAroundOlderSQL = `
+SELECT ` + messageColumns + `
+FROM messages
+WHERE ` + conversationPairSQL + `
+  AND deleted_at IS NULL
+  AND (created_at, id) <= ($3, $4)
+ORDER BY created_at DESC, id DESC
+LIMIT $5
+`
+
+const listAroundNewerSQL = `
+SELECT ` + messageColumns + `
+FROM messages
+WHERE ` + conversationPairSQL + `
+  AND deleted_at IS NULL
+  AND (created_at, id) > ($3, $4)
+ORDER BY created_at ASC, id ASC
+LIMIT $5
+`
+
+// listAround reads the two halves of a page centred on anchor. It asks each side for
+// one row more than the page has room for (olderN and newerN), so the caller learns
+// whether there is more in that direction from whether the extra row came back. The
+// older half comes back newest-first and the newer oldest-first; the extra row is
+// the last of each.
+func listAround(ctx context.Context, db dbExecutor, a, b string, anchor cursor, olderN, newerN int) (older, newer []messageRecord, err error) {
+	older, err = readMessages(ctx, db, listAroundOlderSQL, a, b, anchor.CreatedAt, anchor.ID, olderN+1)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list around (older): %w", err)
+	}
+	newer, err = readMessages(ctx, db, listAroundNewerSQL, a, b, anchor.CreatedAt, anchor.ID, newerN+1)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list around (newer): %w", err)
+	}
+	return older, newer, nil
+}
+
+// readMessages runs a statement that selects messageColumns and scans every row.
+func readMessages(ctx context.Context, db dbExecutor, sql string, args ...any) ([]messageRecord, error) {
+	rows, err := db.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []messageRecord
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate messages: %w", err)
+	}
+	return out, nil
+}
+
 // conversationRecord is one line of the conversation list: the peer, the newest
 // message of the pair that has not been deleted, how many of the peer's messages
 // the caller has not read, and both read markers. A marker is a position, so each
@@ -391,6 +842,35 @@ const acceptedCTE = `accepted AS (
   FROM friendships
   WHERE state = 'accepted' AND (user_a_id = $1 OR user_b_id = $1)
 )`
+
+// mentionableSQL narrows the candidate ids in $2 to those that are $1's accepted
+// friends. It reads through acceptedCTE like the catch-up feed and the
+// conversation list, so a mention is judged by the same definition of "friend".
+const mentionableSQL = `
+WITH ` + acceptedCTE + `
+SELECT peer_id FROM accepted WHERE peer_id = ANY($2)
+`
+
+func loadMentionable(ctx context.Context, db dbExecutor, userID string, candidates []string) (map[string]bool, error) {
+	rows, err := db.Query(ctx, mentionableSQL, userID, candidates)
+	if err != nil {
+		return nil, fmt.Errorf("load mentionable: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan mentionable: %w", err)
+		}
+		out[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate mentionable: %w", err)
+	}
+	return out, nil
+}
 
 // listSummariesSQL is the whole conversation list in one statement; nothing
 // loops over friends asking each one a question. $1 is the caller, $2 and $3 the
@@ -520,6 +1000,84 @@ func listUpdates(ctx context.Context, db dbExecutor, userID string, since int64,
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate updates: %w", err)
+	}
+	return out, nil
+}
+
+// searchMessagesSQL finds live messages whose words match query $2, among the
+// conversations of $1 with people $1 is still accepted friends with. $3 narrows to
+// one peer (NULL for all), and $4/$5 are the keyset position, strictly older than
+// which the page starts (both NULL for the first page); $6 is the page size.
+//
+//   - Friends-only through acceptedCTE, the same set the catch-up feed and the
+//     conversation list read through, so there is one definition of "my friends" and
+//     a search cannot open a thread history refuses to serve. The peer filter sits
+//     inside each branch before its LIMIT, as in listUpdatesSQL, so a page is a true
+//     prefix of the results and a former friend's messages cannot use it up.
+//   - Two indexed branches unioned instead of an OR, one for what I sent and one for
+//     what I received, so each can use its own (user, user, created_at) index.
+//   - body_tsv @@ websearch_to_tsquery('english', $2): websearch_to_tsquery takes
+//     what a person types (quoted phrases, -exclusions) and never raises on
+//     punctuation, where to_tsquery would. A query with no searchable words yields
+//     an empty tsquery that matches nothing. The two-argument form names the same
+//     configuration body_tsv was built with; the GIN index messages_body_tsv_idx
+//     serves the @@.
+//   - deleted_at IS NULL is stated even though a tombstone's body is empty and its
+//     vector empty: a tombstone must not match, and that must not rest on the body
+//     having been cleared.
+//   - Ordered (created_at DESC, id DESC), never by relevance and never by seq, which
+//     an edit or a reaction moves. The keyset is the (created_at, id) of a message
+//     the client holds, like history's.
+const searchMessagesSQL = `
+WITH ` + acceptedCTE + `
+SELECT ` + messageColumns + ` FROM (
+  (SELECT ` + messageColumns + ` FROM messages
+   WHERE sender_id = $1 AND recipient_id IN (SELECT peer_id FROM accepted)
+     AND ($3::text IS NULL OR recipient_id = $3::text)
+     AND deleted_at IS NULL
+     AND body_tsv @@ websearch_to_tsquery('english', $2)
+     AND ($4::timestamptz IS NULL OR (created_at, id) < ($4::timestamptz, $5::text))
+   ORDER BY created_at DESC, id DESC LIMIT $6)
+  UNION ALL
+  (SELECT ` + messageColumns + ` FROM messages
+   WHERE recipient_id = $1 AND sender_id IN (SELECT peer_id FROM accepted)
+     AND ($3::text IS NULL OR sender_id = $3::text)
+     AND deleted_at IS NULL
+     AND body_tsv @@ websearch_to_tsquery('english', $2)
+     AND ($4::timestamptz IS NULL OR (created_at, id) < ($4::timestamptz, $5::text))
+   ORDER BY created_at DESC, id DESC LIMIT $6)
+) hits
+ORDER BY created_at DESC, id DESC
+LIMIT $6
+`
+
+// searchMessages returns one page of matches, newest first: the newest page when
+// before is nil, else the page strictly older than before. with, when not empty,
+// narrows to that one peer.
+func searchMessages(ctx context.Context, db dbExecutor, userID, query, with string, limit int, before *cursor) ([]messageRecord, error) {
+	var withArg, at, id any // NULL unless given
+	if with != "" {
+		withArg = with
+	}
+	if before != nil {
+		at, id = before.CreatedAt, before.ID
+	}
+	rows, err := db.Query(ctx, searchMessagesSQL, userID, query, withArg, at, id, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search messages: %w", err)
+	}
+	defer rows.Close()
+
+	var out []messageRecord
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan result: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate results: %w", err)
 	}
 	return out, nil
 }

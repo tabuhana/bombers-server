@@ -16,6 +16,7 @@ require (
 	github.com/minio/minio-go/v7 v7.2.1
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pressly/goose/v3 v3.27.2
+	github.com/rivo/uniseg v0.4.7
 )
 
 require (
@@ -55,7 +56,6 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/tinylib/msgp v1.6.1 // indirect

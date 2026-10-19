@@ -452,7 +452,7 @@ func buildAndServe() (*app, error) {
 	logx.Info("allowing browser origins: %s", strings.Join(allowedOrigins, ", "))
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: allowedOrigins,
-		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
+		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
 		AllowedHeaders: []string{"Authorization", "Content-Type"},
 	}))
 	r.Get("/health", healthHandler(pool, storage))
@@ -520,6 +520,12 @@ func buildAndServe() (*app, error) {
 			r.Post("/messages", messagingHandler.Send)
 			r.Patch("/messages/{messageID}", messagingHandler.Edit)
 			r.Delete("/messages/{messageID}", messagingHandler.Delete)
+			// Either person in a conversation may pin or unpin either one's message.
+			r.Put("/messages/{messageID}/pin", messagingHandler.Pin)
+			r.Delete("/messages/{messageID}/pin", messagingHandler.Unpin)
+			// Likewise for a reaction: the emoji rides in the path to remove it.
+			r.Put("/messages/{messageID}/reactions", messagingHandler.AddReaction)
+			r.Delete("/messages/{messageID}/reactions/{emoji}", messagingHandler.RemoveReaction)
 			// A read receipt and a typing indicator are both you telling a
 			// friend something, so a token that can only read may not send them.
 			r.Post("/messages/{userID}/read", messagingHandler.MarkRead)
@@ -530,7 +536,10 @@ func buildAndServe() (*app, error) {
 			r.Use(apitokens.RequireScope(apitokens.MessagesRead))
 			r.Get("/messages", messagingHandler.Updates)
 			r.Get("/messages/unread", messagingHandler.Unread)
+			// Static, so it wins over /messages/{userID} the way /messages/unread does.
+			r.Get("/messages/search", messagingHandler.Search)
 			r.Get("/messages/{userID}", messagingHandler.History)
+			r.Get("/messages/{userID}/pins", messagingHandler.Pins)
 			r.Get("/conversations", messagingHandler.Conversations)
 		})
 		// Token scope: the cards you keep about people — the most personal thing here.

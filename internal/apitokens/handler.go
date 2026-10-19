@@ -197,9 +197,9 @@ func describe(s Scope) string {
 	case FriendsRead:
 		return "See who you're friends with"
 	case MessagesRead:
-		return "Read your direct messages, who you've talked to, and what's been read"
+		return "Read and search your direct messages, who you've talked to, and what's been read"
 	case MessagesWrite:
-		return "Send, edit and delete direct messages as you, and show friends when you're typing or have read their messages"
+		return "Send, edit and delete direct messages as you, pin messages and react to them, and show friends when you're typing or have read their messages"
 	case StoreRead:
 		return "Browse and download this server's nodes, packs and games"
 	case StoreWrite:
