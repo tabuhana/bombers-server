@@ -1,0 +1,31 @@
+-- +goose Up
+-- A read marker becomes a POSITION in the conversation, read out of the messages
+-- table, instead of the wall-clock instant at which somebody looked.
+--
+-- The clock was wrong twice. A message is stamped when its transaction starts and
+-- becomes visible when that transaction commits, so a message stamped T can commit
+-- at T+30ms; a reader who opened the conversation at T+10ms got a marker later than
+-- the stamp, the message counted as already read, and it was never unread for
+-- anyone. And a marker taken from the clock almost always "advances", so opening a
+-- conversation with nothing new in it still moved the marker and still told the
+-- other person.
+--
+-- The marker is now the (created_at, id) of the newest message the reader actually
+-- read from that peer. last_read_at keeps its column and its NOT NULL, but its
+-- meaning changes from "the clock when you looked" to "the created_at half of the
+-- position"; last_read_id is the id half. A message is unread when its
+-- (created_at, id) sorts after the position, and no message can slip under a marker
+-- that was copied from a message that was already there.
+--
+-- There is NO backfill, and none may be added. A row written before this migration
+-- has a timestamp and a NULL last_read_id, and the unread comparison treats the
+-- NULL as '' (COALESCE(last_read_id, '')), which sorts below every id: such a row
+-- keeps meaning "everything up to this instant is read", exactly what it meant
+-- before. The first real read after the migration writes a full position over it.
+-- Guessing an id for an old row would pick a message the reader may never have seen.
+ALTER TABLE message_reads ADD COLUMN last_read_id TEXT;
+
+-- +goose Down
+-- last_read_at stays and still holds the created_at half of the position, which
+-- reads as a plain timestamp marker again. Only the id half goes.
+ALTER TABLE message_reads DROP COLUMN last_read_id;

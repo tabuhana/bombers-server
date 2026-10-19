@@ -2,12 +2,20 @@
 // "something you care about changed, go and look".
 //
 // It carries NO CONTENT, and that is the whole design. A nudge is
-// `{"t":"dm","d":{"from":"<user id>"}}` — what changed and whose it is — never
-// the message itself; the client hears it and re-reads through the ordinary HTTP
-// API, which already knows who is allowed to see what. So this package needs no
-// permission model of its own, cannot leak anything by getting a broadcast list
-// slightly wrong, and stays true to the product rule that the server is a
+// `{"t":"profile","d":{"from":"<user id>"}}` — what changed and whose it is —
+// never the thing itself; the client hears it and re-reads through the ordinary
+// HTTP API, which already knows who is allowed to see what. So this package needs
+// no permission model of its own, cannot leak anything by getting a broadcast
+// list slightly wrong, and stays true to the product rule that the server is a
 // published copy plus a nudge — not a live mirror.
+//
+// The one exception is `dm`, which carries the message. The rule is right for
+// `profile`, `friend` and `record`, which fan out to many people and could leak
+// by getting a list wrong. It is wrong for a direct message, which is addressed
+// to exactly the two people in the conversation — the ids come from the message
+// row itself, so there is no broadcast list to get wrong — and a chat that makes
+// you fetch after every doorbell is not a chat. messaging builds the frame and
+// decides who gets it; this package still only delivers what it is handed.
 //
 // It is separate from `rooms`, which is also WebSockets, because the two have
 // nothing in common but the transport. A room socket is scoped to a room, dies
@@ -34,8 +42,11 @@ import (
 // screen in the client re-reads something when it hears it, and a kind nobody
 // listens for is just noise on a wire.
 const (
-	// KindDM — a direct message arrived. `d` carries {"from": "<sender id>"} so a
-	// client showing one conversation can ignore the rest.
+	// KindDM — something happened to a direct message: it arrived, was edited, or
+	// was deleted. `d` carries {"op": "new"|"edit"|"delete", "from": "<sender id>",
+	// "message": {...}} and, on "new" only, the sender's "nonce" if they gave one.
+	// Sent to both people in the conversation, so the sender's other windows and
+	// devices stay in step. The only kind that carries content (see above).
 	KindDM = "dm"
 	// KindProfile — someone whose card you may hold changed it: their details
 	// (PUT /me/profile) or their avatar or banner. Sent to every accepted friend.
@@ -50,6 +61,19 @@ const (
 	// {"node": "<node id>", "from": "<writer id>"}, so the client wakes the one
 	// node concerned instead of every node that has ever sent anything.
 	KindRecord = "record"
+	// KindTyping — a friend is composing a message to you right now
+	// (POST /messages/{userID}/typing). `d` carries {"from": "<typist id>"}.
+	// Sent to that one friend only, stores nothing, and is meant to be allowed to
+	// go missing: the client shows the indicator for a few seconds and lets it
+	// lapse.
+	KindTyping = "typing"
+	// KindRead — a friend read your side of the conversation
+	// (POST /messages/{userID}/read). `d` carries {"from": "<reader id>", "at":
+	// "<RFC 3339>", "id": "<message id>"}, where `at` and `id` together are their
+	// new read position, so the sender can mark everything up to that position as
+	// seen. Sent to that one friend, and only when the marker actually
+	// moved.
+	KindRead = "read"
 )
 
 // sendQueue bounds one connection's backlog. These are tiny and infrequent, so

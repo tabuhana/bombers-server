@@ -423,9 +423,10 @@ func buildAndServe() (*app, error) {
 		notifyHub.SendMany(viewerIDs, notify.KindProfile, map[string]string{"from": ownerID})
 	}
 	profilesHandler := profiles.NewHandler(pool, profileNudge)
-	messagingHandler := messaging.NewHandler(pool, func(recipientID, senderID string) {
-		notifyHub.Send(recipientID, notify.KindDM, map[string]string{"from": senderID})
-	})
+	// A direct message carries its content to both people in the conversation
+	// (see the notify package for why this kind alone does), so messaging is
+	// handed the hub's fan-out as it is.
+	messagingHandler := messaging.NewHandler(pool, notifyHub.SendMany)
 	syncHandler := sync.NewHandler(pool)
 	nodesHandler := nodes.NewHandler(pool)
 	nodeshareHandler := nodeshare.NewHandler(pool)
@@ -517,12 +518,20 @@ func buildAndServe() (*app, error) {
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.MessagesWrite))
 			r.Post("/messages", messagingHandler.Send)
+			r.Patch("/messages/{messageID}", messagingHandler.Edit)
+			r.Delete("/messages/{messageID}", messagingHandler.Delete)
+			// A read receipt and a typing indicator are both you telling a
+			// friend something, so a token that can only read may not send them.
+			r.Post("/messages/{userID}/read", messagingHandler.MarkRead)
+			r.Post("/messages/{userID}/typing", messagingHandler.Typing)
 		})
 		// Token scope: reading DMs.
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.MessagesRead))
+			r.Get("/messages", messagingHandler.Updates)
 			r.Get("/messages/unread", messagingHandler.Unread)
 			r.Get("/messages/{userID}", messagingHandler.History)
+			r.Get("/conversations", messagingHandler.Conversations)
 		})
 		// Token scope: the cards you keep about people — the most personal thing here.
 		r.Group(func(r chi.Router) {
@@ -565,10 +574,6 @@ func buildAndServe() (*app, error) {
 		r.Put("/me/presence", presenceHandler.SetMine)
 		r.Put("/me/about/{subjectID}", profilesHandler.UpsertMyAbout)
 		r.Delete("/me/about/{subjectID}", profilesHandler.DeleteMyAbout)
-		// Static /messages/unread is registered before the /messages/{userID}
-		// param route so chi matches it first (it would anyway — static beats
-		// wildcard — but keep them together).
-		r.Post("/messages/{userID}/read", messagingHandler.MarkRead)
 		// The official node store: operator-published SDK bundles. Any authed
 		// user browses + installs; PUBLISHING is admin-only (below).
 		// Admin-only store curation — the console's publish/unpublish reached
