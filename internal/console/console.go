@@ -22,7 +22,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// How long any single console command may hold a DB connection.
+// How long any single console command may hold a DB connection. It bounds work and
+// never a conversation: a command that asks the operator something takes its context
+// for what follows from confirm, after the answer.
 const commandTimeout = 5 * time.Second
 
 // errStop is the sentinel a command returns to end the loop and shut the
@@ -167,16 +169,27 @@ func (c *Console) lookup(name string) *command {
 // typed `expect` exactly. Typing the name back is deliberately more friction
 // than "y" — this is the one place the console destroys data.
 //
+// On a yes it hands back the context for the work that follows, with a deadline that
+// starts NOW, after the answer. The context a command was called with began when the
+// command did, before the operator was asked, so a person reading the question and
+// typing a name was spending its clock: a slow confirmation expired it, and the work
+// then failed, or failed after the database had already acted. A confirmation is a
+// person and is never on the clock, so the only way on from one is through this context
+// and a command must not touch its own ctx again after calling confirm. On a no there is
+// nothing to cancel, and the cancel func is safe to call and to defer either way.
+//
 // Without a live input scanner (a piped or absent stdin) it answers NO: an
 // irreversible action must never proceed just because nobody could be asked.
-func (c *Console) confirm(prompt, expect string) bool {
+func (c *Console) confirm(prompt, expect string) (work context.Context, cancel context.CancelFunc, ok bool) {
+	no := func() (context.Context, context.CancelFunc, bool) { return nil, func() {}, false }
 	if c.scanner == nil {
 		fmt.Fprintln(c.out, "  (no interactive input — refusing)")
-		return false
+		return no()
 	}
 	fmt.Fprint(c.out, prompt)
-	if !c.scanner.Scan() {
-		return false
+	if !c.scanner.Scan() || strings.TrimSpace(c.scanner.Text()) != expect {
+		return no()
 	}
-	return strings.TrimSpace(c.scanner.Text()) == expect
+	work, cancel = context.WithTimeout(context.Background(), commandTimeout)
+	return work, cancel, true
 }

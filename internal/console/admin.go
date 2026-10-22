@@ -111,7 +111,11 @@ func runDeleteUser(ctx context.Context, c *Console, args []string) error {
 	fmt.Fprintf(c.out, "  Delete %s (%s)?\n", username, id)
 	fmt.Fprintln(c.out, "  This removes their account, profile, media, messages, friendships,")
 	fmt.Fprintln(c.out, "  published items and node transfers. It cannot be undone.")
-	if !c.confirm("  type the username to confirm: ", username) {
+	// From here on ctx is not used: it started before the question and the operator's
+	// typing was on its clock. The work runs under the context confirm hands back.
+	work, cancelWork, ok := c.confirm("  type the username to confirm: ", username)
+	defer cancelWork()
+	if !ok {
 		fmt.Fprintln(c.out, "  cancelled")
 		return nil
 	}
@@ -120,12 +124,12 @@ func runDeleteUser(ctx context.Context, c *Console, args []string) error {
 	// takes those rows, so the names have to be read first. A picture sent in the
 	// instant between this read and the delete is not covered; `ban` first if that
 	// matters.
-	pictures, err := userImageMessageIDs(ctx, c, id)
+	pictures, err := userImageMessageIDs(work, c, id)
 	if err != nil {
 		return err
 	}
 
-	tag, err := c.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+	tag, err := c.pool.Exec(work, `DELETE FROM users WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
 	}
@@ -133,8 +137,8 @@ func runDeleteUser(ctx context.Context, c *Console, args []string) error {
 		return fmt.Errorf("no user %q", args[0])
 	}
 	fmt.Fprintf(c.out, "  deleted %s\n", username)
-	// Its own deadline: the command's began before the operator was asked to confirm,
-	// and a person with many pictures is more than a command's worth of removals.
+	// Its own, longer deadline: a person with many pictures is more than a command's
+	// worth of removals.
 	rmCtx, cancel := context.WithTimeout(context.Background(), imageRemovalTimeout)
 	defer cancel()
 	if failed := removeMessageImages(rmCtx, c.media, pictures); failed > 0 {
