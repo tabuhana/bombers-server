@@ -491,9 +491,10 @@ func TestInviterIsToldOfTheAnswer(t *testing.T) {
 			t.Errorf("frame %d = %+v, want %s %s by %s", i, n, want.id, want.state, want.from)
 		}
 	}
-	// The invitee was told it arrived, pending, and nothing else.
+	// The invitee was told it arrived, pending, then (see
+	// TestAnswererIsToldTooWithTheSameInvite) her own answer.
 	first := g.nudges("alice")
-	if len(first) != 1 || first[0].kind != KindInvite || first[0].inv.State != InvitePending || first[0].inv.ID != acc.ID {
+	if len(first) != 2 || first[0].kind != KindInvite || first[0].inv.State != InvitePending || first[0].inv.ID != acc.ID {
 		t.Errorf("alice heard %+v", first)
 	}
 }
@@ -612,5 +613,37 @@ func TestInvitesUnderConcurrentUse(t *testing.T) {
 	wg.Wait()
 	if got := g.list("alice"); len(got) != 0 {
 		t.Fatalf("pending invites after the room closed: %+v", got)
+	}
+}
+
+// The invitee's OTHER windows must settle on the answer too, or they keep showing
+// a pending invite that would now 409. The frame is the same invite the inviter
+// got, carrying the state that was chosen, and a re-list agrees with it.
+func TestAnswererIsToldTooWithTheSameInvite(t *testing.T) {
+	for _, accept := range []bool{true, false} {
+		g, _ := standardRoom(t)
+		inv := decodeInvite(t, g.invite("room1", "bob", "alice"))
+		want := InviteDeclined
+		if accept {
+			g.accept("alice", inv.ID)
+			want = InviteAccepted
+		} else {
+			g.decline("alice", inv.ID)
+		}
+
+		mine := g.nudges("alice")
+		if len(mine) != 2 {
+			t.Fatalf("accept=%v: alice heard %d frames, want 2 (the invite, then her answer): %+v", accept, len(mine), mine)
+		}
+		got, theirs := mine[1], g.nudges("bob")
+		if got.kind != KindInvite || got.inv.ID != inv.ID || got.inv.State != want {
+			t.Errorf("accept=%v: answerer's frame = %+v, want %s", accept, got, want)
+		}
+		if len(theirs) != 1 || theirs[0].inv != got.inv {
+			t.Errorf("accept=%v: inviter's frame %+v differs from the answerer's %+v", accept, theirs, got)
+		}
+		if len(g.list("alice")) != 0 {
+			t.Errorf("accept=%v: a re-list still shows the invite the frame said was %s", accept, want)
+		}
 	}
 }

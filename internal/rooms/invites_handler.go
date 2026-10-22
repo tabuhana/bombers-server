@@ -38,10 +38,15 @@ type inviteRequest struct {
 
 // pushInvite tells one user about an invite as it now stands.
 func (h *Handler) pushInvite(userID string, inv Invite) {
+	h.pushInviteTo([]string{userID}, inv)
+}
+
+// pushInviteTo tells several users the same invite, as one frame value.
+func (h *Handler) pushInviteTo(userIDs []string, inv Invite) {
 	if h.nudge == nil {
 		return
 	}
-	h.nudge([]string{userID}, KindInvite, inv)
+	h.nudge(userIDs, KindInvite, inv)
 }
 
 // mayInvite is the gate on asking someone to a room, run before the room is
@@ -158,7 +163,7 @@ func (h *Handler) DeclineInvite(w http.ResponseWriter, r *http.Request) {
 }
 
 // answer is the one path both answers share, so they cannot disagree on who may
-// answer or what happens next. On success the inviter is told; on any refusal it
+// answer or what happens next. On success the inviter and the answerer are told; on any refusal it
 // has already written the response and returns false.
 func (h *Handler) answer(w http.ResponseWriter, r *http.Request, accept bool) (Invite, bool) {
 	authedID, ok := auth.UserIDFromContext(r.Context())
@@ -169,7 +174,11 @@ func (h *Handler) answer(w http.ResponseWriter, r *http.Request, accept bool) (I
 	inv, err := h.hub.AnswerInvite(authedID, chi.URLParam(r, "inviteID"), accept, h.now())
 	switch {
 	case err == nil:
-		h.pushInvite(inv.From, inv)
+		// ONE frame, built once from the settled invite, to both ends: the inviter
+		// learns the answer, and every other window the invitee owns settles on it
+		// instead of showing a pending invite that would now 409. Two pushes built
+		// separately could disagree about what the answer was.
+		h.pushInviteTo([]string{inv.From, inv.To}, inv)
 		return inv, true
 	case errors.Is(err, ErrInviteExpired):
 		httpx.WriteError(w, http.StatusGone, errInviteExpired)

@@ -85,7 +85,8 @@ const (
 	// (internal/rooms). `d` carries the whole invite, {"id", "room", "room_name",
 	// "from", "from_name", "to", "to_name", "state", "expires_at"}, and its `state`
 	// says which change this is: "pending" to the invitee when it is made,
-	// "accepted" or "declined" to the inviter when answered. One kind for every
+	// "accepted" or "declined" to the inviter AND the answerer when answered (the
+	// answerer's other windows settle on the same answer). One kind for every
 	// change, like KindDM. It carries content because it is addressed to exactly the
 	// two people it concerns, whose ids come from the invite itself — and it is
 	// STILL only a nudge: the server holds the invite and GET /invites lists it, so
