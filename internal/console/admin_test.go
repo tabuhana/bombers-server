@@ -86,4 +86,36 @@ func TestDeluserReadsThePicturesBeforeTheDeleteAndRemovesThemAfter(t *testing.T)
 	if read < 0 || del < 0 || remove < 0 || !(read < del && del < remove) {
 		t.Errorf("read at %d, delete at %d, remove at %d: want read < delete < remove", read, del, remove)
 	}
+	// The profile media goes the same way: after the delete, never before it (a delete
+	// that failed would have destroyed the avatar of an account that still exists), and
+	// once.
+	media := strings.Index(src, "removeProfileMedia(rmCtx, c.media, id)")
+	if n := strings.Count(src, "removeProfileMedia("); n != 2 {
+		t.Errorf("removeProfileMedia appears %d times, want its definition and one call", n)
+	}
+	if media < 0 || !(del < media) {
+		t.Errorf("delete at %d, profile media removal at %d: want delete < removal", del, media)
+	}
+}
+
+// An account's avatar and banner are removed by one prefix, which is the user and not a
+// list of kinds: a kind added later is covered without anyone remembering to add it here.
+func TestDeletingAnAccountRemovesItsProfileMediaByOnePrefix(t *testing.T) {
+	s := &recordingStore{}
+	if err := removeProfileMedia(context.Background(), s, "u1"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(s.removed, ",") != "users/u1/" {
+		t.Errorf("removed = %v, want the one prefix users/u1/ (with the slash, so u10 is safe)", s.removed)
+	}
+}
+
+func TestRemovingProfileMediaReportsAFailureAndWithNoStoreIsANoOp(t *testing.T) {
+	s := &recordingStore{fail: map[string]bool{"users/u1/": true}}
+	if err := removeProfileMedia(context.Background(), s, "u1"); err == nil {
+		t.Error("a bucket that refused was reported as success")
+	}
+	if err := removeProfileMedia(context.Background(), nil, "u1"); err != nil {
+		t.Errorf("no store: %v", err)
+	}
 }

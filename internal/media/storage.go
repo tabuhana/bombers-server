@@ -85,8 +85,15 @@ func NewStorage(ctx context.Context, endpoint, accessKey, secretKey, bucket stri
 // per (user, kind) — a reupload overwrites in place, which is exactly the
 // replace semantics the API promises.
 func objectKey(userID, kind string) string {
-	return fmt.Sprintf("users/%s/%s", userID, kind)
+	return UserPrefix(userID) + kind
 }
+
+// UserPrefix is everything a user has in the store: both kinds today and whatever kind
+// is added later. Deleting an account cascades its rows away in the database where no
+// handler sees it, so the console removes the bytes by this prefix. The trailing slash
+// matters: without it, removing one id would also take every object of another id that
+// merely begins with the same characters.
+func UserPrefix(userID string) string { return "users/" + userID + "/" }
 
 // PutObject writes (or overwrites) an object at an explicit key.
 func (s *Storage) PutObject(ctx context.Context, key string, data []byte, contentType string) error {

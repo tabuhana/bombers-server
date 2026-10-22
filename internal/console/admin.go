@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/tabuhana/bombers-server/internal/admin"
+	"github.com/tabuhana/bombers-server/internal/media"
 	"github.com/tabuhana/bombers-server/internal/messaging"
 )
 
@@ -139,7 +140,24 @@ func runDeleteUser(ctx context.Context, c *Console, args []string) error {
 	if failed := removeMessageImages(rmCtx, c.media, pictures); failed > 0 {
 		fmt.Fprintf(c.out, "  could not remove %d of %d message pictures from the object store; they are unreachable now and only take up space\n", failed, len(pictures))
 	}
+	// Their avatar and banner, the same way: the cascade took the rows that describe them
+	// and nothing else knows they exist.
+	if err := removeProfileMedia(rmCtx, c.media, id); err != nil {
+		fmt.Fprintf(c.out, "  could not remove their profile media from the object store (%v); it is unreachable now and only takes up space\n", err)
+	}
 	return nil
+}
+
+// removeProfileMedia takes everything a user has under users/<id>/ out of the object
+// store: avatar, banner and any kind added later, since the prefix is the user and not a
+// list of kinds. Best-effort for the reason removeMessageImages is: the account is
+// gone, and a failure here leaves bytes nothing can reach. With no store there is
+// nothing to remove from.
+func removeProfileMedia(ctx context.Context, store objectStore, userID string) error {
+	if store == nil {
+		return nil
+	}
+	return store.RemovePrefix(ctx, media.UserPrefix(userID))
 }
 
 // imageRemovalTimeout bounds taking all of a deleted account's pictures out of the

@@ -76,3 +76,54 @@ func TestFSStore(t *testing.T) {
 		t.Fatalf("Remove idempotent: %v", err)
 	}
 }
+
+// Removing a user's prefix takes every kind they have and nothing of anyone else's, in
+// particular not a user whose id merely begins with the same characters.
+func TestRemovingAUserPrefixTakesTheirMediaAndNoOneElses(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewFSStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ user, kind string }{
+		{"u1", "avatar"}, {"u1", "banner"}, {"u10", "avatar"}, {"u2", "banner"},
+	} {
+		if err := store.Put(ctx, c.user, c.kind, []byte(c.user+c.kind), "image/png"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := store.RemovePrefix(ctx, UserPrefix("u1")); err != nil {
+		t.Fatalf("RemovePrefix: %v", err)
+	}
+	for _, kind := range []string{"avatar", "banner"} {
+		if _, err := store.Get(ctx, "u1", kind); !errors.Is(err, ErrObjectNotFound) {
+			t.Errorf("u1 %s survived: %v", kind, err)
+		}
+	}
+	for _, c := range []struct{ user, kind string }{{"u10", "avatar"}, {"u2", "banner"}} {
+		rc, err := store.Get(ctx, c.user, c.kind)
+		if err != nil {
+			t.Errorf("%s %s was removed with u1's prefix: %v", c.user, c.kind, err)
+			continue
+		}
+		_ = rc.Close()
+	}
+	// A user with nothing stored is a no-op.
+	if err := store.RemovePrefix(ctx, UserPrefix("nobody")); err != nil {
+		t.Errorf("a prefix that holds nothing: %v", err)
+	}
+}
+
+// Every key a user's media is stored at is under their prefix, so removing the prefix
+// cannot miss a kind.
+func TestEveryMediaKeyIsUnderTheUsersPrefix(t *testing.T) {
+	if got := UserPrefix("u1"); got != "users/u1/" {
+		t.Errorf("UserPrefix = %q", got)
+	}
+	for _, kind := range []string{"avatar", "banner"} {
+		if key := objectKey("u1", kind); key != "users/u1/"+kind {
+			t.Errorf("objectKey(u1, %s) = %q", kind, key)
+		}
+	}
+}
