@@ -450,7 +450,10 @@ func buildAndServe() (*app, error) {
 		notifyHub.SendMany(userIDs, notify.KindRecord, map[string]string{"node": nodeID, "from": fromID})
 	})
 	mediaHandler := media.NewHandler(pool, storage, profileNudge)
-	roomsHandler := rooms.NewHandler(pool, issuer, notifyHub.SendMany)
+	// An invite is held by its room, in memory; the message that carries it in
+	// the DM thread is messaging's to write. rooms is handed the write as a func
+	// (the same seam the fan-out is) and voids the invite if it fails.
+	roomsHandler := rooms.NewHandler(pool, issuer, notifyHub.SendMany, messagingHandler.MintInvite)
 	activitiesHandler := activities.NewHandler(pool, storage)
 	packsHandler := packs.NewHandler(pool, storage)
 	releasesHandler := releases.NewHandler(pool, storage)
@@ -641,6 +644,7 @@ func buildAndServe() (*app, error) {
 		// nudge), and the two answers. Accepting joins nothing; it returns the room id
 		// and the client opens the socket through the same join gate as ever.
 		r.Post("/rooms/{roomID}/invites", roomsHandler.CreateInvite)
+		r.Get("/invites/{inviteID}", roomsHandler.GetInvite)
 		r.Get("/invites", roomsHandler.ListInvites)
 		r.Post("/invites/{inviteID}/accept", roomsHandler.AcceptInvite)
 		r.Post("/invites/{inviteID}/decline", roomsHandler.DeclineInvite)

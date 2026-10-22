@@ -1,8 +1,10 @@
 // Package messaging owns direct messages: text DMs between two users, persisted
-// indefinitely in Postgres (DMs are not ephemeral; rooms are). Text only —
-// image/file attachments wait for the later S3 phase. A message can answer an
-// earlier one of the same conversation, and either person can pin it or react to
-// it. Live delivery carries the message: once a write is stored, the Notify func
+// indefinitely in Postgres (DMs are not ephemeral; rooms are). A message has a kind
+// (kinds.go): what a person types is text, and the other kinds are minted by the
+// server, never declared by a client. Pictures wait for the later S3 phase. A
+// message can answer an earlier one of the same conversation, and either person
+// can pin it or react to it. Live delivery carries the message: once a write is
+// stored, the Notify func
 // below (wired to internal/notify in main) pushes it to both people in the
 // conversation, so a client applies it directly instead of going back to ask. This
 // domain stays the durable REST source of truth — history for a fresh reader, a
@@ -13,6 +15,7 @@
 package messaging
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,6 +88,7 @@ const (
 	// covers non-friend, blocked, nonexistent, and self-target alike.
 	// errMessageNotFound is the same idea for a message id: it covers missing,
 	// already deleted and not yours, so an id can't be probed for.
+	errInvalidBody      = "invalid_body"
 	errEmptyBody        = "empty_body"
 	errBodyTooLong      = "body_too_long"
 	errNonceTooLong     = "nonce_too_long"
@@ -242,6 +246,11 @@ type messageResponse struct {
 	PinnedAt    *time.Time        `json:"pinned_at"`
 	Reactions   []reactionSummary `json:"reactions"`
 	Mentions    []string          `json:"mentions"`
+	// Kind is always present: text, invite or image. Payload is what a non-text kind
+	// carries, and is LEFT OUT (not null) for text and for a deleted message, so a
+	// client that predates kinds sees the shape it always did plus one field.
+	Kind    string          `json:"kind"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 // replyPreview is what a reply shows of the message it answers: resolved every time
@@ -278,6 +287,8 @@ func toResponse(m *messageRecord) messageResponse {
 		PinnedAt:    m.PinnedAt,
 		Reactions:   []reactionSummary{},
 		Mentions:    []string{},
+		Kind:        m.Kind,
+		Payload:     m.Payload,
 	}
 }
 
@@ -430,6 +441,26 @@ type sendMessageRequest struct {
 	Body        string `json:"body"`
 	Nonce       string `json:"nonce"`
 	ReplyToID   string `json:"reply_to_id"`
+	// Kind and Payload are READ only to be refused. A client cannot declare a kind
+	// (see kinds.go): they are here so that naming one is an error rather than an
+	// unknown field the decoder drops, which would turn `kind: "invite"` into a
+	// plain text message nobody was told about. Nothing below copies either onto the
+	// message that is stored.
+	Kind    *string         `json:"kind"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// clientDeclaredAKind is whether the request tries to say anything about kind or
+// payload other than what every send already is: text with no payload. Saying
+// "text" out loud is allowed, and so is a payload of JSON null (no payload).
+func (req *sendMessageRequest) clientDeclaredAKind() bool {
+	if req.Kind != nil && *req.Kind != kindText {
+		return true
+	}
+	if len(req.Payload) != 0 && !bytes.Equal(bytes.TrimSpace(req.Payload), []byte("null")) {
+		return true
+	}
+	return false
 }
 
 // sendResponse is the message plus the nonce the sender supplied, echoed so their
@@ -517,6 +548,13 @@ func (h *Handler) Send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// THE RULE: a client cannot declare a kind. This is checked before anything else
+	// about the message, and the answer names no reason beyond "invalid body".
+	if req.clientDeclaredAKind() {
+		httpx.WriteError(w, http.StatusBadRequest, errInvalidBody)
+		return
+	}
+
 	recipientID := strings.TrimSpace(plainText(req.RecipientID))
 	body, code := cleanBody(req.Body)
 	if code != "" {
@@ -563,6 +601,7 @@ func (h *Handler) Send(w http.ResponseWriter, r *http.Request) {
 			Body:        body,
 			Nonce:       nonce,
 			ReplyToID:   replyTo,
+			Kind:        kindText, // never req.Kind: see sendMessageRequest
 		})
 		created = wasCreated
 		return m, err

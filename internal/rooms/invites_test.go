@@ -32,7 +32,15 @@ type inviteRig struct {
 	friends map[[2]string]bool
 	clock   time.Time
 	sent    []nudged
+
+	// What the handler asked messaging to write, and a way to make that fail.
+	minted   []mintedMessage
+	mintErr  error
+	mintCtxs []context.Context
 }
+
+// mintedMessage is one call to the injected "mint an invite message" func.
+type mintedMessage struct{ inviteID, roomID, roomName, from, to string }
 
 func newInviteRig(t *testing.T) *inviteRig {
 	g := &inviteRig{t: t, friends: map[[2]string]bool{}, clock: time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)}
@@ -43,6 +51,15 @@ func newInviteRig(t *testing.T) *inviteRig {
 		for _, id := range userIDs {
 			g.sent = append(g.sent, nudged{to: id, kind: kind, inv: inv})
 		}
+	}, func(ctx context.Context, inviteID, roomID, roomName, from, to string) error {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.mintCtxs = append(g.mintCtxs, ctx)
+		if g.mintErr != nil {
+			return g.mintErr
+		}
+		g.minted = append(g.minted, mintedMessage{inviteID, roomID, roomName, from, to})
+		return nil
 	})
 	g.h.friends = func(_ context.Context, a, b string) (bool, error) {
 		g.mu.Lock()

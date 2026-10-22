@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -25,6 +26,9 @@ const KindInvite = "invite"
 
 const (
 	inviteBodyLimit = 1 << 12 // 4 KiB - an invite request is one id.
+
+	// inviteMintTimeout bounds the write of a new invite's message.
+	inviteMintTimeout = 5 * time.Second
 
 	errInviteNotFound = "invite_not_found"
 	errInviteExpired  = "invite_expired"
@@ -135,8 +139,33 @@ func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !created {
+		// The existing invite already has its message; a second would be a second
+		// card for one invitation.
 		httpx.WriteJSON(w, http.StatusOK, inv)
 		return
+	}
+
+	// A NEW invite gets its message in the thread, and the two are made together or
+	// not at all. The invite lives in memory and the message in the database, so
+	// this is not a transaction - it is the invite first, then the message, and if
+	// the message cannot be written the invite is VOIDED: an invite with no card is
+	// one its inviter cannot see and its invitee is told about by nothing. The other
+	// direction (a message whose invite is gone, after a restart or the room
+	// ending) is allowed and correct: the card still says what was said, and
+	// GET /invites/{id} says the invite is no longer live.
+	//
+	// The write is not tied to the request: a client hanging up between the invite
+	// and its message must not leave one without the other.
+	if h.mintInvite != nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), inviteMintTimeout)
+		err := h.mintInvite(ctx, inv.ID, inv.Room, inv.RoomName, authedID, inv.To)
+		cancel()
+		if err != nil {
+			logx.Error("rooms: invite message: %v", err)
+			room.VoidInvite(inv.ID)
+			httpx.WriteError(w, http.StatusInternalServerError, "could not create invite")
+			return
+		}
 	}
 	h.pushInvite(inv.To, inv)
 	httpx.WriteJSON(w, http.StatusCreated, inv)
@@ -154,6 +183,30 @@ func (h *Handler) ListInvites(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"invites": h.hub.InvitesFor(authedID, h.now()),
 	})
+}
+
+// GetInvite is GET /invites/{inviteID}: the invite as its inviter OR its invitee
+// reads it, in whatever state it is in. It is what a card in the DM thread asks, so
+// the sender's can say "they declined" and the recipient's "you joined" instead of
+// going blank once the invite stops being pending (GET /invites lists only what is
+// waiting, addressed to you).
+//
+// A 404 is the whole of the other answer, and the card should read it as EXPIRED:
+// an invite that is not live cannot be joined, whether it was answered long ago,
+// was pruned by the reaper's sweep, or went with the process. Unknown and not-yours
+// are the same 404, so an id cannot be probed for.
+func (h *Handler) GetInvite(w http.ResponseWriter, r *http.Request) {
+	authedID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	inv, err := h.hub.InviteFor(authedID, chi.URLParam(r, "inviteID"), h.now())
+	if err != nil {
+		httpx.WriteError(w, http.StatusNotFound, errInviteNotFound)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, inv)
 }
 
 // AcceptInvite is POST /invites/{inviteID}/accept. It marks the invite and hands

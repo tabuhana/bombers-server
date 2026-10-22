@@ -30,7 +30,7 @@ func getRoom(h *Handler, roomID, userID string) *httptest.ResponseRecorder {
 // is what lets these run without a database. The friend path is the same
 // allowed() that Join uses.
 func TestGetOpenRoomForHost(t *testing.T) {
-	h := NewHandler(nil, nil, nil)
+	h := NewHandler(nil, nil, nil, nil)
 	h.hub.Create("room1", "amber-lantern", "host", time.Now())
 
 	rec := getRoom(h, "room1", "host")
@@ -49,7 +49,7 @@ func TestGetOpenRoomForHost(t *testing.T) {
 // An unknown id and an ended room answer identically — an invite can't tell
 // "never existed" from "over", and neither can anyone probing ids.
 func TestGetMissingOrClosedRoomIs404(t *testing.T) {
-	h := NewHandler(nil, nil, nil)
+	h := NewHandler(nil, nil, nil, nil)
 	h.hub.Create("room2", "old-lantern", "host", time.Now()).Close()
 
 	for _, id := range []string{"nope", "room2"} {

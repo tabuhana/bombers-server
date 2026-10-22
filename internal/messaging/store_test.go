@@ -137,6 +137,7 @@ func (d *fakeDB) seed(id, sender, recipient, body string) messageRecord {
 	m := messageRecord{
 		ID: id, Seq: d.seq, SenderID: sender, RecipientID: recipient, Body: body,
 		CreatedAt: d.clock.Add(time.Duration(d.seq) * time.Minute),
+		Kind:      kindText, // the column default
 	}
 	d.msgs = append(d.msgs, m)
 	return m
@@ -294,6 +295,8 @@ func (d *fakeDB) queryRow(sql string, args []any, inTx bool) pgx.Row {
 		// An empty nonce is NULL, which never collides.
 		sender, recipient, nonce := args[1].(string), args[2].(string), args[4].(string)
 		replyTo, _ := args[5].(*string)
+		kind, _ := args[6].(string)
+		payload, _ := args[7].([]byte)
 		if nonce != "" {
 			for _, m := range d.msgs {
 				if m.SenderID == sender && m.RecipientID == recipient && m.Nonce == nonce {
@@ -305,6 +308,8 @@ func (d *fakeDB) queryRow(sql string, args []any, inTx bool) pgx.Row {
 		d.find(m.ID).Nonce = nonce
 		d.find(m.ID).ReplyToID = replyTo
 		m.ReplyToID = replyTo
+		d.find(m.ID).Kind, d.find(m.ID).Payload = kind, payload
+		m.Kind, m.Payload = kind, payload
 		return messageRow(m)
 	case findByNonceSQL:
 		sender, recipient, nonce := args[0].(string), args[1].(string), args[2].(string)
@@ -316,13 +321,13 @@ func (d *fakeDB) queryRow(sql string, args []any, inTx bool) pgx.Row {
 		return fakeRow{err: pgx.ErrNoRows}
 	case ownMessageRecipientSQL:
 		m := d.find(args[0].(string))
-		if m == nil || m.SenderID != args[1].(string) || m.DeletedAt != nil {
+		if m == nil || m.SenderID != args[1].(string) || m.DeletedAt != nil || m.Kind != kindText {
 			return fakeRow{err: pgx.ErrNoRows}
 		}
 		return fakeRow{vals: []any{m.RecipientID}}
 	case editMessageSQL:
 		m := d.find(args[0].(string))
-		if m == nil || m.SenderID != args[1].(string) || m.DeletedAt != nil {
+		if m == nil || m.SenderID != args[1].(string) || m.DeletedAt != nil || m.Kind != kindText {
 			return fakeRow{err: pgx.ErrNoRows}
 		}
 		d.seq++
@@ -336,7 +341,7 @@ func (d *fakeDB) queryRow(sql string, args []any, inTx bool) pgx.Row {
 		}
 		d.seq++
 		at := d.clock.Add(time.Duration(d.seq) * time.Minute)
-		m.Body, m.DeletedAt, m.Seq, m.PinnedAt, m.ReplyToID = "", &at, d.seq, nil, nil
+		m.Body, m.DeletedAt, m.Seq, m.PinnedAt, m.ReplyToID, m.Payload = "", &at, d.seq, nil, nil, nil
 		return messageRow(*m)
 	case replyTargetSQL:
 		a, b, id := args[0].(string), args[1].(string), args[2].(string)
@@ -787,7 +792,7 @@ func (r fakeRow) Scan(dest ...any) error {
 }
 
 func messageValues(m messageRecord) []any {
-	return []any{m.ID, m.Seq, m.SenderID, m.RecipientID, m.Body, m.CreatedAt, m.EditedAt, m.DeletedAt, m.ReplyToID, m.PinnedAt}
+	return []any{m.ID, m.Seq, m.SenderID, m.RecipientID, m.Body, m.CreatedAt, m.EditedAt, m.DeletedAt, m.ReplyToID, m.PinnedAt, m.Kind, m.Payload}
 }
 
 func messageRow(m messageRecord) fakeRow { return fakeRow{vals: messageValues(m)} }
@@ -904,7 +909,7 @@ func TestSQLCatchUpAndConversationListShareOneDefinitionOfFriends(t *testing.T) 
 // that is still on its way. So the stamp is explicit, and the lock comes first.
 // Edits and deletes leave their own columns alone.
 func TestSQLInsertStampsCreatedAtUnderTheLockNotAtTransactionStart(t *testing.T) {
-	mustContain(t, "insertMessageSQL", insertMessageSQL, "created_at, nonce, reply_to_id) VALUES ($1, $2, $3, $4, clock_timestamp(),")
+	mustContain(t, "insertMessageSQL", insertMessageSQL, "created_at, nonce, reply_to_id, kind, payload) VALUES ($1, $2, $3, $4, clock_timestamp(),")
 	mustNotContain(t, "insertMessageSQL", insertMessageSQL, "now()", "DEFAULT")
 	mustContain(t, "editMessageSQL", editMessageSQL, "edited_at = now()")
 	mustContain(t, "deleteMessageSQL", deleteMessageSQL, "deleted_at = now()")
@@ -915,7 +920,7 @@ func TestSQLInsertStampsCreatedAtUnderTheLockNotAtTransactionStart(t *testing.T)
 	// transaction, through the path a send takes.
 	db := newFakeDB("a", "b")
 	if _, err := writeSeq(context.Background(), db.begin, func(tx dbExecutor) (*messageRecord, error) {
-		m, _, err := insertOnce(context.Background(), tx, &messageRecord{ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi"})
+		m, _, err := insertOnce(context.Background(), tx, &messageRecord{Kind: kindText, ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi"})
 		return m, err
 	}); err != nil {
 		t.Fatal(err)
@@ -952,14 +957,14 @@ func TestSQLEditAndDeleteAreSenderOnlyAndBumpSeq(t *testing.T) {
 		mustNotContain(t, name, sql, "created_at =")
 	}
 	mustContain(t, "edit", editMessageSQL, "SET body = $3, edited_at = now()")
-	mustContain(t, "delete", deleteMessageSQL, "SET body = '', deleted_at = now()")
+	mustContain(t, "delete", deleteMessageSQL, "SET body = '', payload = NULL, deleted_at = now()")
 }
 
 // An absent nonce is stored as NULL, so the partial unique index never sees an
 // empty string, and the repeat lookup states the equality that index serves.
 func TestSQLNonceIsNullWhenAbsentAndLookedUpByConversationAndNonce(t *testing.T) {
 	mustContain(t, "insertMessageSQL", insertMessageSQL,
-		"INSERT INTO messages (id, sender_id, recipient_id, body, created_at, nonce, reply_to_id) VALUES ($1, $2, $3, $4, clock_timestamp(), NULLIF($5::text, ''), $6::text)",
+		"INSERT INTO messages (id, sender_id, recipient_id, body, created_at, nonce, reply_to_id, kind, payload) VALUES ($1, $2, $3, $4, clock_timestamp(), NULLIF($5::text, ''), $6::text, $7::text, $8::jsonb)",
 		"RETURNING "+messageColumns,
 	)
 	mustContain(t, "findByNonceSQL", findByNonceSQL,
@@ -1061,7 +1066,7 @@ func TestWriteSeqLocksBeforeWritingAndCommits(t *testing.T) {
 	db := newFakeDB("a", "b")
 
 	_, err := writeSeq(context.Background(), db.begin, func(tx dbExecutor) (*messageRecord, error) {
-		return insertMessage(context.Background(), tx, &messageRecord{ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi"})
+		return insertMessage(context.Background(), tx, &messageRecord{Kind: kindText, ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi"})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1184,13 +1189,13 @@ func TestInsertOnceReturnsTheOriginalForARepeatAndDrawsNoSeq(t *testing.T) {
 	db := newFakeDB("a", "b")
 	ctx := context.Background()
 
-	first, created, err := insertOnce(ctx, db, &messageRecord{ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"})
+	first, created, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"})
 	if err != nil || !created {
 		t.Fatalf("first = %+v, created %v, err %v", first, created, err)
 	}
 	seqAfterFirst := db.seq
 
-	again, created, err := insertOnce(ctx, db, &messageRecord{ID: "m2", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"})
+	again, created, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: "m2", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"})
 	if err != nil || created {
 		t.Fatalf("repeat = %+v, created %v, err %v, want the original and created=false", again, created, err)
 	}
@@ -1209,14 +1214,14 @@ func TestInsertOnceReturnsTheOriginalForARepeatAndDrawsNoSeq(t *testing.T) {
 func TestInsertOnceReturnsTheCurrentStateOfTheOriginal(t *testing.T) {
 	db := newFakeDB("a", "b")
 	ctx := context.Background()
-	if _, _, err := insertOnce(ctx, db, &messageRecord{ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"}); err != nil {
+	if _, _, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := editMessage(ctx, db, "m1", "a", "hello"); err != nil {
 		t.Fatal(err)
 	}
 
-	again, created, err := insertOnce(ctx, db, &messageRecord{ID: "m2", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"})
+	again, created, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: "m2", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"})
 	if err != nil || created || again.Body != "hello" || again.EditedAt == nil {
 		t.Errorf("repeat = %+v, created %v, err %v, want the edited original", again, created, err)
 	}
@@ -1227,7 +1232,7 @@ func TestInsertOnceWithoutANonceAlwaysInserts(t *testing.T) {
 	ctx := context.Background()
 
 	for _, id := range []string{"m1", "m2"} {
-		_, created, err := insertOnce(ctx, db, &messageRecord{ID: id, SenderID: "a", RecipientID: "b", Body: "same"})
+		_, created, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: id, SenderID: "a", RecipientID: "b", Body: "same"})
 		if err != nil || !created {
 			t.Fatalf("%s: created %v, err %v", id, created, err)
 		}
@@ -1245,10 +1250,10 @@ func TestInsertOnceKeysOnTheSenderToo(t *testing.T) {
 	db := newFakeDB("a", "b")
 	ctx := context.Background()
 
-	if _, created, err := insertOnce(ctx, db, &messageRecord{ID: "m1", SenderID: "a", RecipientID: "b", Body: "from a", Nonce: "shared"}); err != nil || !created {
+	if _, created, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: "m1", SenderID: "a", RecipientID: "b", Body: "from a", Nonce: "shared"}); err != nil || !created {
 		t.Fatalf("a: created %v, err %v", created, err)
 	}
-	got, created, err := insertOnce(ctx, db, &messageRecord{ID: "m2", SenderID: "b", RecipientID: "a", Body: "from b", Nonce: "shared"})
+	got, created, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: "m2", SenderID: "b", RecipientID: "a", Body: "from b", Nonce: "shared"})
 	if err != nil || !created || got.ID != "m2" || got.Body != "from b" {
 		t.Errorf("b = %+v, created %v, err %v, want a separate new message", got, created, err)
 	}
@@ -1264,14 +1269,14 @@ func TestInsertOnceKeysOnTheRecipientToo(t *testing.T) {
 	db := newFakeDB("a", "b", "c")
 	ctx := context.Background()
 
-	if _, created, err := insertOnce(ctx, db, &messageRecord{ID: "m1", SenderID: "a", RecipientID: "b", Body: "to b", Nonce: "n1"}); err != nil || !created {
+	if _, created, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: "m1", SenderID: "a", RecipientID: "b", Body: "to b", Nonce: "n1"}); err != nil || !created {
 		t.Fatalf("to b: created %v, err %v", created, err)
 	}
-	got, created, err := insertOnce(ctx, db, &messageRecord{ID: "m2", SenderID: "a", RecipientID: "c", Body: "to c", Nonce: "n1"})
+	got, created, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: "m2", SenderID: "a", RecipientID: "c", Body: "to c", Nonce: "n1"})
 	if err != nil || !created || got.ID != "m2" || got.RecipientID != "c" {
 		t.Errorf("to c = %+v, created %v, err %v, want a separate new message", got, created, err)
 	}
-	again, created, err := insertOnce(ctx, db, &messageRecord{ID: "m3", SenderID: "a", RecipientID: "c", Body: "to c", Nonce: "n1"})
+	again, created, err := insertOnce(ctx, db, &messageRecord{Kind: kindText, ID: "m3", SenderID: "a", RecipientID: "c", Body: "to c", Nonce: "n1"})
 	if err != nil || created || again.ID != "m2" {
 		t.Errorf("retry to c = %+v, created %v, err %v, want m2", again, created, err)
 	}
@@ -1286,7 +1291,7 @@ func TestInsertOnceStopsWhenTheLookupFails(t *testing.T) {
 	db := newFakeDB("a", "b")
 	db.failOnQuery = findByNonceSQL
 
-	_, _, err := insertOnce(context.Background(), db, &messageRecord{ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"})
+	_, _, err := insertOnce(context.Background(), db, &messageRecord{Kind: kindText, ID: "m1", SenderID: "a", RecipientID: "b", Body: "hi", Nonce: "n1"})
 	if err == nil {
 		t.Fatal("expected the lookup failure to surface")
 	}
@@ -1888,7 +1893,7 @@ func TestSQLMessageColumnsCarryTheReplyLinkAndThePin(t *testing.T) {
 // reply_to_id is written by the insert and by nothing else, which is what makes it
 // immutable; the pin columns are written only by the pin statements and the delete.
 func TestSQLNothingButTheInsertWritesTheReplyLinkAndOnlyDeleteClearsIt(t *testing.T) {
-	mustContain(t, "insertMessageSQL", insertMessageSQL, "reply_to_id) VALUES", "$6::text")
+	mustContain(t, "insertMessageSQL", insertMessageSQL, "reply_to_id, kind, payload) VALUES", "$6::text")
 	for name, sql := range map[string]string{
 		"editMessageSQL": editMessageSQL, "pinMessageSQL": pinMessageSQL, "unpinMessageSQL": unpinMessageSQL,
 	} {

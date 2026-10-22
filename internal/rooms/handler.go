@@ -54,6 +54,15 @@ type Handler struct {
 	// nil means nobody is listening, which is how tests build a handler.
 	nudge func(userIDs []string, kind string, data any)
 
+	// mintInvite writes the message that says "come to my room" into the DM thread
+	// between the inviter and the invitee, once for every NEW invite. Injected from
+	// main (messaging owns the write: the row, its seq, the kind and payload and the
+	// frames to both people), so rooms never imports messaging - the seam nudge is.
+	// An error means no message was written, and CreateInvite then voids the invite.
+	// Nil means no messaging is wired, which is how tests and the console build a
+	// handler; main always supplies one.
+	mintInvite MintInviteMessage
+
 	// The two questions this package asks the database, and the clock. Fields so a
 	// test can answer them without Postgres or a real hour; NewHandler wires the
 	// real ones.
@@ -62,8 +71,13 @@ type Handler struct {
 	now      func() time.Time
 }
 
-func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer, nudge func(userIDs []string, kind string, data any)) *Handler {
-	h := &Handler{pool: pool, issuer: issuer, hub: NewHub(), nudge: nudge, now: time.Now}
+// MintInviteMessage writes the DM-thread message for a new invite: the invite's id,
+// the room and its name as it is now, from the inviter to the invitee. Plain types,
+// like the notify fan-out, so the package that implements it need not be imported.
+type MintInviteMessage func(ctx context.Context, inviteID, roomID, roomName, inviterID, inviteeID string) error
+
+func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer, nudge func(userIDs []string, kind string, data any), mintInvite MintInviteMessage) *Handler {
+	h := &Handler{pool: pool, issuer: issuer, hub: NewHub(), nudge: nudge, mintInvite: mintInvite, now: time.Now}
 	h.friends = func(ctx context.Context, a, b string) (bool, error) { return areFriends(ctx, h.pool, a, b) }
 	h.username = func(ctx context.Context, userID string) string { return usernameFor(ctx, h.pool, userID) }
 	// An invite that expires is pushed to its invitee through the same helper every

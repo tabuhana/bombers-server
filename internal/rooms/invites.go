@@ -385,6 +385,56 @@ func (r *Room) pendingInviteFor(inviteID, userID string, now time.Time) (Invite,
 	return v, v.State == InvitePending
 }
 
+// InviteFor is one invite as userID may read it, in whatever state it is in: they
+// must be its inviter or its invitee. It is the read behind a card in a thread,
+// which has to say accepted, declined or expired to BOTH people, where
+// pendingInviteFor (the invitee's list of what is waiting) cannot. Anyone else, and an
+// id the room no longer holds, is ErrInviteNotFound - one answer, so an id cannot be
+// probed for.
+func (r *Room) InviteFor(inviteID, userID string, now time.Time) (Invite, error) {
+	defer r.flushExpired()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	inv, ok := r.invites[inviteID]
+	if !ok || (inv.To != userID && inv.From != userID) {
+		return Invite{}, ErrInviteNotFound
+	}
+	return r.viewLocked(inv, now), nil
+}
+
+// VoidInvite takes back an invite that was made a moment ago and must not have
+// been: the message that goes with it could not be written, and an invite its
+// inviter has no card for is one nobody should be able to answer. It is not a
+// decline and not an expiry - nobody was told of the invite, so nobody is told it
+// is gone - and it makes no state of its own: the invite simply never existed. Any
+// news already queued about it is dropped with it, for the same reason, and the
+// index forgets it.
+//
+// It is for the handler that has just created the invite, and no other caller.
+func (r *Room) VoidInvite(inviteID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	inv, ok := r.invites[inviteID]
+	if !ok {
+		return
+	}
+	delete(r.invites, inviteID)
+	r.expired = withoutInvite(r.expired, inviteID)
+	r.voided = withoutInvite(r.voided, inviteID)
+	// r.mu -> index lock, the one order.
+	r.idx.drop([]indexRef{{user: inv.To, id: inviteID, room: r}})
+}
+
+func withoutInvite(queue []Invite, inviteID string) []Invite {
+	kept := queue[:0:0]
+	for _, inv := range queue {
+		if inv.ID != inviteID {
+			kept = append(kept, inv)
+		}
+	}
+	return kept
+}
+
 // HasMember reports whether `userID` is in the room at this moment.
 func (r *Room) HasMember(userID string) bool {
 	r.mu.Lock()
@@ -404,6 +454,12 @@ func (r *Room) HasMember(userID string) bool {
 type inviteIndex struct {
 	mu     sync.Mutex
 	byUser map[string]map[string]indexEntry // invitee -> invite id -> where
+	// byID finds an invite by its id alone, for the one read that either party may
+	// make (GET /invites/{id}): the inviter is not the key of byUser, and walking
+	// every room to find theirs would be the very thing this index exists to avoid.
+	// It holds exactly the entries byUser holds - add and drop keep the two in step
+	// - so an id is known to one if and only if it is known to the other.
+	byID map[string]indexEntry
 }
 
 type indexEntry struct {
@@ -412,7 +468,7 @@ type indexEntry struct {
 }
 
 func newInviteIndex() *inviteIndex {
-	return &inviteIndex{byUser: map[string]map[string]indexEntry{}}
+	return &inviteIndex{byUser: map[string]map[string]indexEntry{}, byID: map[string]indexEntry{}}
 }
 
 func (x *inviteIndex) add(userID, inviteID string, r *Room, expiresAt time.Time) {
@@ -427,6 +483,16 @@ func (x *inviteIndex) add(userID, inviteID string, r *Room, expiresAt time.Time)
 		x.byUser[userID] = set
 	}
 	set[inviteID] = indexEntry{room: r, expiresAt: expiresAt}
+	x.byID[inviteID] = indexEntry{room: r, expiresAt: expiresAt}
+}
+
+// locate finds the room that holds the invite, whoever it is addressed to. It is
+// only a locator: who may READ the invite is the room's call (Room.InviteFor), made
+// under the room's lock, so this never answers "is this yours".
+func (x *inviteIndex) locate(inviteID string) *Room {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return x.byID[inviteID].room
 }
 
 // lookup finds the room that holds `inviteID` among those addressed to `userID`.
@@ -479,9 +545,13 @@ func (x *inviteIndex) lapsed(now time.Time) []indexRef {
 // `expired` until their hour and not a moment longer, which is also what lets
 // the ended room itself be collected.
 func (x *inviteIndex) drop(refs []indexRef) {
+	if x == nil {
+		return
+	}
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	for _, ref := range refs {
+		delete(x.byID, ref.id)
 		set := x.byUser[ref.user]
 		delete(set, ref.id)
 		if len(set) == 0 {
@@ -507,6 +577,17 @@ func (h *Hub) InvitesFor(userID string, now time.Time) []Invite {
 	// ULIDs sort by creation time, so the id is the order.
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
 	return out
+}
+
+// InviteFor finds the invite by id and returns it to its inviter or its invitee,
+// whatever state it is in. ErrInviteNotFound covers every other case: unknown,
+// pruned by the reaper, lost with the process, or not yours.
+func (h *Hub) InviteFor(userID, inviteID string, now time.Time) (Invite, error) {
+	room := h.invites.locate(inviteID)
+	if room == nil {
+		return Invite{}, ErrInviteNotFound
+	}
+	return room.InviteFor(inviteID, userID, now)
 }
 
 // AnswerInvite finds the invite among those addressed to `userID` and records

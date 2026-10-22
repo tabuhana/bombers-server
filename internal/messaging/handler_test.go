@@ -292,7 +292,7 @@ func TestSendEchoesTheNonceAndPushesTheMessageToBothSides(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	wantKeys := []string{"body", "created_at", "deleted_at", "edited_at", "id", "mentions", "nonce", "pinned_at", "reactions", "recipient_id", "reply_to", "sender_id", "seq"}
+	wantKeys := []string{"body", "created_at", "deleted_at", "edited_at", "id", "kind", "mentions", "nonce", "pinned_at", "reactions", "recipient_id", "reply_to", "sender_id", "seq"}
 	var gotKeys []string
 	for k := range raw {
 		gotKeys = append(gotKeys, k)
@@ -342,7 +342,7 @@ func TestTheNonceIsStoredWithTheMessage(t *testing.T) {
 	}
 
 	inserts := e.db.callsTo(insertMessageSQL)
-	if len(inserts) != 1 || len(inserts[0].args) != 6 || inserts[0].args[4] != "n-1" {
+	if len(inserts) != 1 || len(inserts[0].args) != 8 || inserts[0].args[4] != "n-1" {
 		t.Fatalf("inserts = %+v, want one with the trimmed nonce as its fifth argument", inserts)
 	}
 	if len(e.db.msgs) != 1 || e.db.msgs[0].Nonce != "n-1" {
@@ -1299,7 +1299,7 @@ func TestMessageShape(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := []string{"body", "created_at", "deleted_at", "edited_at", "id", "mentions", "pinned_at", "reactions", "recipient_id", "reply_to", "sender_id", "seq"}
+	want := []string{"body", "created_at", "deleted_at", "edited_at", "id", "kind", "mentions", "pinned_at", "reactions", "recipient_id", "reply_to", "sender_id", "seq"}
 	if !reflect.DeepEqual(keys, want) {
 		t.Errorf("message keys = %v, want %v", keys, want)
 	}

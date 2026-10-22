@@ -42,12 +42,16 @@ type messageRecord struct {
 	ReplyToID   *string
 	PinnedAt    *time.Time
 	Nonce       string
+	// Kind is what sort of message this is (kinds.go); Payload is what a non-text
+	// kind carries, raw JSON, and nil for text and for a tombstone.
+	Kind    string
+	Payload []byte
 }
 
 // messageColumns is every SELECT's and RETURNING's column list, in the order
 // scanMessage reads them. One list, so a column added to the shape is added in
 // one place and a query can't return a message with a field missing.
-const messageColumns = `id, seq, sender_id, recipient_id, body, created_at, edited_at, deleted_at, reply_to_id, pinned_at`
+const messageColumns = `id, seq, sender_id, recipient_id, body, created_at, edited_at, deleted_at, reply_to_id, pinned_at, kind, payload`
 
 // rowScanner is what pgx.Row and pgx.Rows share.
 type rowScanner interface {
@@ -58,7 +62,7 @@ type rowScanner interface {
 // one place the order is written down in Go, shared by every scan that reads a
 // whole message, alone or as part of a wider row.
 func messageDests(m *messageRecord) []any {
-	return []any{&m.ID, &m.Seq, &m.SenderID, &m.RecipientID, &m.Body, &m.CreatedAt, &m.EditedAt, &m.DeletedAt, &m.ReplyToID, &m.PinnedAt}
+	return []any{&m.ID, &m.Seq, &m.SenderID, &m.RecipientID, &m.Body, &m.CreatedAt, &m.EditedAt, &m.DeletedAt, &m.ReplyToID, &m.PinnedAt, &m.Kind, &m.Payload}
 }
 
 func scanMessage(row rowScanner) (messageRecord, error) {
@@ -128,14 +132,23 @@ var errPinLimit = errors.New("too many pins")
 // sit after a message that was still on its way. clock_timestamp() is read when
 // this statement runs, which is inside the lock and before the commit, so
 // created_at order is seq order is commit order.
+//
+// kind and payload are written here and nowhere else, and are always spelled out:
+// the column default is a backstop for rows that predate kinds, not something this
+// code leans on. Whether a kind may be written, and with what payload, is
+// checkKindPayload's call, made before the statement runs; the CHECK on the column
+// is the last line.
 const insertMessageSQL = `
-INSERT INTO messages (id, sender_id, recipient_id, body, created_at, nonce, reply_to_id)
-VALUES ($1, $2, $3, $4, clock_timestamp(), NULLIF($5::text, ''), $6::text)
+INSERT INTO messages (id, sender_id, recipient_id, body, created_at, nonce, reply_to_id, kind, payload)
+VALUES ($1, $2, $3, $4, clock_timestamp(), NULLIF($5::text, ''), $6::text, $7::text, $8::jsonb)
 RETURNING ` + messageColumns + `
 `
 
 func insertMessage(ctx context.Context, db dbExecutor, m *messageRecord) (*messageRecord, error) {
-	out, err := scanMessage(db.QueryRow(ctx, insertMessageSQL, m.ID, m.SenderID, m.RecipientID, m.Body, m.Nonce, m.ReplyToID))
+	if err := checkKindPayload(m.Kind, m.Payload); err != nil {
+		return nil, fmt.Errorf("insert message: %w", err)
+	}
+	out, err := scanMessage(db.QueryRow(ctx, insertMessageSQL, m.ID, m.SenderID, m.RecipientID, m.Body, m.Nonce, m.ReplyToID, m.Kind, m.Payload))
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
 	}
@@ -191,9 +204,15 @@ func insertOnce(ctx context.Context, db dbExecutor, m *messageRecord) (saved *me
 // message that is someone else's, missing or deleted is zero rows here too: the
 // friendship gate on an edit needs the recipient, and the only person who may learn
 // it is the one who sent the message.
+//
+// Only a TEXT message can be edited: an edit rewrites words, and an invite or a
+// picture has none to rewrite. A card is not a body somebody typed, so a body put
+// on one would be text standing in for a thing the server minted. The kind is in the
+// lookup, so an attempt to edit one is the same zero rows as any other message that
+// cannot be edited, and the same opaque 404.
 const ownMessageRecipientSQL = `
 SELECT recipient_id FROM messages
-WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
+WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL AND kind = 'text'
 `
 
 // ownMessageRecipient returns the recipient of a live message sent by senderID, or
@@ -219,7 +238,7 @@ func ownMessageRecipient(ctx context.Context, db dbExecutor, id, senderID string
 const editMessageSQL = `
 UPDATE messages
 SET body = $3, edited_at = now(), seq = nextval('messages_seq')
-WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
+WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL AND kind = 'text'
 RETURNING ` + messageColumns + `
 `
 
@@ -239,10 +258,12 @@ func editMessage(ctx context.Context, db dbExecutor, id, senderID, body string) 
 // whoever reads the table next honours it. The pin and the reply link go with
 // them: a tombstone is not pinned, and what it answered was part of what it said.
 // A message that OTHERS replied to keeps those replies, whose preview then reports
-// it deleted.
+// it deleted. The payload goes with the body: an invite card or a picture is what
+// the message said, and a tombstone says nothing. The kind stays, so the row is
+// still what it was.
 const deleteMessageSQL = `
 UPDATE messages
-SET body = '', deleted_at = now(), pinned_at = NULL, pinned_by = NULL, reply_to_id = NULL,
+SET body = '', payload = NULL, deleted_at = now(), pinned_at = NULL, pinned_by = NULL, reply_to_id = NULL,
     seq = nextval('messages_seq')
 WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
 RETURNING ` + messageColumns + `
