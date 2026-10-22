@@ -170,6 +170,11 @@ type Room struct {
 	// mu is never taken while holding it.
 	invites map[string]*Invite
 	idx     *inviteIndex
+	// expired queues invites that became expired and whose invitee has not been told
+	// yet; onExpired is what tells them. Both are guarded by mu, and the queue is
+	// only ever emptied by flushExpired, outside the lock (see there).
+	expired   []Invite
+	onExpired func(Invite)
 }
 
 // MemberInfo is the wire-safe view of a member (presence lists, join/leave).
@@ -332,6 +337,11 @@ func (r *Room) Close() {
 	r.order = nil
 	r.mu.Unlock()
 
+	// Tell each pending invitee their invite died with the room. Outside the lock,
+	// and before the sockets are closed: closing one can run arbitrary teardown, and
+	// the news that an invite is gone should not wait behind it.
+	r.flushExpired()
+
 	// Outside the lock: closing a connection can run arbitrary teardown, and
 	// holding the room's lock through it would let one slow socket freeze
 	// everything else.
@@ -489,6 +499,10 @@ type Hub struct {
 	// its own lock, deliberately: GET /invites must not queue behind the hub lock
 	// that every room create, lookup and reap takes.
 	invites *inviteIndex
+	// onExpired tells an invitee their invite expired. Set once, by the Handler,
+	// before any room exists (Create copies it into each room); nil means nobody is
+	// told, which is how a hub built on its own in a test behaves.
+	onExpired func(Invite)
 }
 
 func NewHub() *Hub {
@@ -511,6 +525,7 @@ func (h *Hub) Create(id, name, hostID string, now time.Time) *Room {
 		members:    map[string]*Member{},
 		emptySince: now, // nobody has connected yet; the reaper's grace covers it
 		idx:        h.invites,
+		onExpired:  h.onExpired,
 	}
 	h.rooms[id] = r
 	return r
@@ -571,8 +586,15 @@ func (h *Hub) Reap(now time.Time, grace time.Duration) int {
 		r.Close()
 	}
 	// Invites that have run out their hour stop being findable. Done here because
-	// this is the one sweep the hub already has.
-	h.invites.prune(now)
+	// this is the one sweep the hub already has. Each is settled first, so one that
+	// nobody read since it lapsed is announced to its invitee BEFORE it is
+	// forgotten; the index is dropped last, and only of what was settled. No lock is
+	// held across the rooms: `lapsed` and `drop` each take the index lock alone.
+	lapsed := h.invites.lapsed(now)
+	for _, ref := range lapsed {
+		ref.room.lapse(ref.id, now)
+	}
+	h.invites.drop(lapsed)
 	return len(ending)
 }
 

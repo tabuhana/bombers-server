@@ -37,7 +37,8 @@ const (
 	InviteAccepted InviteState = "accepted"
 	InviteDeclined InviteState = "declined"
 	// InviteExpired is "pending, but out of time or out of room". It is reached
-	// only by the lazy check on a read and by the room ending.
+	// only by the lazy check on a read, by the room ending, and by the reaper's
+	// sweep - and only ever from pending, so an answered invite never becomes one.
 	InviteExpired InviteState = "expired"
 )
 
@@ -85,17 +86,40 @@ type Invite struct {
 // would show "pending" for something nobody can accept. Caller holds r.mu.
 func (r *Room) settleLocked(inv *Invite, now time.Time) {
 	if inv.State == InvitePending && (r.closed || !now.Before(inv.ExpiresAt)) {
-		inv.State = InviteExpired
+		r.expireLocked(inv)
 	}
+}
+
+// copyLocked is the one place an invite is copied for the outside, with the room's
+// name as it is now. Every invite that leaves this package - a response body or a
+// pushed frame - is built here, so the two cannot grow different shapes. Caller
+// holds r.mu.
+func (r *Room) copyLocked(inv *Invite) Invite {
+	out := *inv
+	out.RoomName = r.name
+	return out
 }
 
 // viewLocked settles the invite and returns a copy for the outside. Caller holds
 // r.mu.
 func (r *Room) viewLocked(inv *Invite, now time.Time) Invite {
 	r.settleLocked(inv, now)
-	out := *inv
-	out.RoomName = r.name
-	return out
+	return r.copyLocked(inv)
+}
+
+// expireLocked is the ONLY place a pending invite becomes expired, and it is
+// where the invitee is owed a frame. The transition happens once per invite (it
+// is only ever made from pending, and expired is final), so recording the news
+// here is what makes "told exactly once" true however the invite got there: a
+// read that found it lapsed, the room closing, or the reaper's sweep. Accepted
+// and declined invites never come through here, so a settled answer is never
+// contradicted.
+//
+// It only QUEUES the news (r.expired); pushing is flushExpired's job, with no
+// lock held. Caller holds r.mu.
+func (r *Room) expireLocked(inv *Invite) {
+	inv.State = InviteExpired
+	r.expired = append(r.expired, r.copyLocked(inv))
 }
 
 // disposeInvitesLocked is the room ending: every invite still pending becomes
@@ -104,8 +128,45 @@ func (r *Room) viewLocked(inv *Invite, now time.Time) Invite {
 func (r *Room) disposeInvitesLocked() {
 	for _, inv := range r.invites {
 		if inv.State == InvitePending {
-			inv.State = InviteExpired
+			r.expireLocked(inv)
 		}
+	}
+}
+
+// flushExpired hands the invites that expired since the last flush to the room's
+// sink, which tells each invitee. It takes r.mu only to swap the queue out and
+// calls the sink with NO lock held: the sink reaches the notify hub, and a push
+// made under r.mu would hold the room across code this package does not own.
+//
+// THE RULE: every method that can settle an invite must run this AFTER it has
+// released r.mu - `defer r.flushExpired()` BEFORE the Lock, so the deferred
+// calls unwind Unlock first - or the news sits in the queue until some other
+// call happens along. A method that settles and does not flush is a silent
+// expiry. Nothing here asks whether the invitee is listening; the frame is a
+// nudge and GET /invites is the truth.
+func (r *Room) flushExpired() {
+	r.mu.Lock()
+	queued := r.expired
+	r.expired = nil
+	sink := r.onExpired
+	r.mu.Unlock()
+
+	if sink == nil {
+		return
+	}
+	for _, inv := range queued {
+		sink(inv)
+	}
+}
+
+// lapse settles one invite by id on behalf of the reaper, so an invite whose hour
+// ran out with nobody reading it is still announced before the index forgets it.
+func (r *Room) lapse(inviteID string, now time.Time) {
+	defer r.flushExpired()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if inv, ok := r.invites[inviteID]; ok {
+		r.settleLocked(inv, now)
 	}
 }
 
@@ -121,6 +182,7 @@ func (r *Room) disposeInvitesLocked() {
 // The friendship rules are the caller's (they need the database); this owns who
 // may ask and what an invite is.
 func (r *Room) Invite(byUserID, inviteeID, inviteeName string, now time.Time) (inv Invite, created bool, err error) {
+	defer r.flushExpired()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -197,6 +259,7 @@ func (r *Room) forgetSpentInvitesLocked(now time.Time) {
 // Accepting joins nothing. The caller hands back the room id and the client opens
 // the room's socket as it always has, through the same gate.
 func (r *Room) AnswerInvite(inviteID, userID string, accept bool, now time.Time) (Invite, error) {
+	defer r.flushExpired()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -223,6 +286,7 @@ func (r *Room) AnswerInvite(inviteID, userID string, accept bool, now time.Time)
 // pendingInviteFor is one invite as `userID` should see it in their listing, or
 // false when it is not theirs or is no longer pending.
 func (r *Room) pendingInviteFor(inviteID, userID string, now time.Time) (Invite, bool) {
+	defer r.flushExpired()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	inv, ok := r.invites[inviteID]
@@ -286,6 +350,7 @@ func (x *inviteIndex) lookup(userID, inviteID string) *Room {
 }
 
 type indexRef struct {
+	user string
 	id   string
 	room *Room
 }
@@ -295,25 +360,44 @@ func (x *inviteIndex) forUser(userID string) []indexRef {
 	defer x.mu.Unlock()
 	out := make([]indexRef, 0, len(x.byUser[userID]))
 	for id, e := range x.byUser[userID] {
-		out = append(out, indexRef{id: id, room: e.room})
+		out = append(out, indexRef{user: userID, id: id, room: e.room})
 	}
 	return out
 }
 
-// prune drops entries whose invite has run out its hour. An ended room's invites
-// stay readable as `expired` until then and not a moment longer, which is also
-// what lets the ended room itself be collected.
-func (x *inviteIndex) prune(now time.Time) {
+// lapsed lists the entries whose invite has run out its hour, WITHOUT removing
+// them. The reaper settles each one's room (which announces any that were still
+// pending) and only then drops exactly this list: dropping first would leave the
+// id reading as `404 invite_not_found` to someone who was never told it expired.
+// It returns a list rather than calling the rooms because the index never calls
+// into a room while holding its lock.
+func (x *inviteIndex) lapsed(now time.Time) []indexRef {
 	x.mu.Lock()
 	defer x.mu.Unlock()
+	var out []indexRef
 	for uid, set := range x.byUser {
 		for id, e := range set {
 			if !now.Before(e.expiresAt) {
-				delete(set, id)
+				out = append(out, indexRef{user: uid, id: id, room: e.room})
 			}
 		}
+	}
+	return out
+}
+
+// drop forgets the given entries, and only those. It takes the list `lapsed`
+// returned rather than asking the clock again, so nothing is forgotten that was
+// not first settled and announced. An ended room's invites stay readable as
+// `expired` until their hour and not a moment longer, which is also what lets
+// the ended room itself be collected.
+func (x *inviteIndex) drop(refs []indexRef) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	for _, ref := range refs {
+		set := x.byUser[ref.user]
+		delete(set, ref.id)
 		if len(set) == 0 {
-			delete(x.byUser, uid)
+			delete(x.byUser, ref.user)
 		}
 	}
 }

@@ -66,6 +66,10 @@ func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer, nudge func(userIDs []st
 	h := &Handler{pool: pool, issuer: issuer, hub: NewHub(), nudge: nudge, now: time.Now}
 	h.friends = func(ctx context.Context, a, b string) (bool, error) { return areFriends(ctx, h.pool, a, b) }
 	h.username = func(ctx context.Context, userID string) string { return usernameFor(ctx, h.pool, userID) }
+	// An invite that expires is pushed to its invitee through the same helper every
+	// other invite frame uses. It reads h.nudge when it fires, so a nil nudge stays
+	// a quiet no-op.
+	h.hub.onExpired = func(inv Invite) { h.pushInvite(inv.To, inv) }
 	return h
 }
 

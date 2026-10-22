@@ -647,3 +647,228 @@ func TestAnswererIsToldTooWithTheSameInvite(t *testing.T) {
 		}
 	}
 }
+
+// states is what a person was told, in order, as bare states - the shape every
+// expiry test asks about.
+func states(ns []nudged) []InviteState {
+	out := make([]InviteState, len(ns))
+	for i, n := range ns {
+		out[i] = n.inv.State
+	}
+	return out
+}
+
+func sameStates(a, b []InviteState) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// A room ending tells every invitee whose invite was still pending, once, with the
+// same invite object every other push carries. The inviter is not told: a room
+// they were in ending is something they can see.
+func TestClosingARoomTellsEachPendingInviteeOnce(t *testing.T) {
+	g, room := standardRoom(t)
+	g.befriend("host", "dan")
+	g.befriend("bob", "dan")
+	a := decodeInvite(t, g.invite("room1", "bob", "alice"))
+	d := decodeInvite(t, g.invite("room1", "bob", "dan"))
+
+	room.Close()
+
+	for _, want := range []Invite{a, d} {
+		got := g.nudges(want.To)
+		if !sameStates(states(got), []InviteState{InvitePending, InviteExpired}) {
+			t.Fatalf("%s heard %v, want pending then expired", want.To, states(got))
+		}
+		n := got[1]
+		if n.kind != KindInvite || n.inv.ID != want.ID || n.inv.Room != "room1" ||
+			n.inv.From != "bob" || n.inv.To != want.To || n.inv.RoomName != "amber-lantern" {
+			t.Errorf("%s: frame = %+v", want.To, n)
+		}
+		// A re-list agrees the invite is gone.
+		if len(g.list(want.To)) != 0 {
+			t.Errorf("%s: a re-list still shows the invite the frame said had expired", want.To)
+		}
+	}
+	// The inviter hears nothing about it (and nothing was answered).
+	if got := g.nudges("bob"); len(got) != 0 {
+		t.Errorf("the inviter was told: %+v", got)
+	}
+
+	room.Close() // twice is still once
+	g.h.hub.Reap(g.clock, emptyGrace)
+	if got := g.nudges("alice"); len(got) != 2 {
+		t.Errorf("alice has now heard %d frames after a second Close and a sweep, want 2: %v", len(got), states(got))
+	}
+}
+
+// An answered invite is settled, and the room ending must not contradict the
+// answer its two ends already got.
+func TestAnsweredInviteIsNotToldItExpired(t *testing.T) {
+	g, room := standardRoom(t)
+	g.befriend("host", "dan")
+	g.befriend("bob", "dan")
+	g.befriend("host", "carol")
+	g.befriend("bob", "carol")
+	acc := decodeInvite(t, g.invite("room1", "bob", "alice"))
+	dec := decodeInvite(t, g.invite("room1", "bob", "dan"))
+	open := decodeInvite(t, g.invite("room1", "bob", "carol"))
+	g.accept("alice", acc.ID)
+	g.decline("dan", dec.ID)
+
+	room.Close()
+
+	if got := states(g.nudges("alice")); !sameStates(got, []InviteState{InvitePending, InviteAccepted}) {
+		t.Errorf("alice (accepted) heard %v", got)
+	}
+	if got := states(g.nudges("dan")); !sameStates(got, []InviteState{InvitePending, InviteDeclined}) {
+		t.Errorf("dan (declined) heard %v", got)
+	}
+	carol := g.nudges("carol")
+	if !sameStates(states(carol), []InviteState{InvitePending, InviteExpired}) || carol[1].inv.ID != open.ID {
+		t.Errorf("carol (still pending) heard %v", states(carol))
+	}
+	// The inviter heard the two answers and nothing else.
+	if got := states(g.nudges("bob")); !sameStates(got, []InviteState{InviteAccepted, InviteDeclined}) {
+		t.Errorf("bob heard %v", got)
+	}
+}
+
+// The hour running out, with nobody reading, is announced by the reaper - and
+// BEFORE the index forgets the invite. The hook runs inside the push and looks at
+// both locks: if the sweep pushed with the index lock or the room lock held, it
+// would never get them; if it pruned first, the id would already be gone.
+func TestReaperTellsBeforePruning(t *testing.T) {
+	g, room := standardRoom(t)
+	inv := decodeInvite(t, g.invite("room1", "bob", "alice"))
+
+	var stillIndexed, reachable bool
+	inner := g.h.nudge
+	g.h.nudge = func(userIDs []string, kind string, data any) {
+		if got, _ := data.(Invite); got.State == InviteExpired {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				stillIndexed = g.h.hub.invites.lookup("alice", inv.ID) != nil
+				reachable = room.HasMember("host")
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Error("a lock was held across the push")
+			}
+		}
+		inner(userIDs, kind, data)
+	}
+
+	g.advance(InviteTTL + time.Second)
+	g.h.hub.Reap(g.clock, emptyGrace)
+
+	got := g.nudges("alice")
+	if !sameStates(states(got), []InviteState{InvitePending, InviteExpired}) || got[1].inv.ID != inv.ID {
+		t.Fatalf("alice heard %v", states(got))
+	}
+	if !stillIndexed {
+		t.Error("the invite was already pruned from the index when the push was made")
+	}
+	if !reachable {
+		t.Error("the room lock was held across the push")
+	}
+	// Pruned afterwards, as before.
+	if rec := g.accept("alice", inv.ID); rec.Code != http.StatusNotFound {
+		t.Errorf("accept after the sweep: status = %d", rec.Code)
+	}
+	if got := g.nudges("bob"); len(got) != 0 {
+		t.Errorf("the inviter was told of a lapse: %+v", got)
+	}
+}
+
+// The ways an invite can lapse - a read that notices, the room closing, the sweep,
+// a new ask - must between them tell the invitee exactly once, whichever got
+// there first.
+func TestExpiryIsToldExactlyOnceWhicheverPathGetsThereFirst(t *testing.T) {
+	t.Run("a read notices, then the sweep", func(t *testing.T) {
+		g, _ := standardRoom(t)
+		decodeInvite(t, g.invite("room1", "bob", "alice"))
+		g.advance(InviteTTL)
+		g.list("alice") // settles it lazily
+		g.h.hub.Reap(g.clock, emptyGrace)
+		g.h.hub.Reap(g.clock, emptyGrace)
+		if got := states(g.nudges("alice")); !sameStates(got, []InviteState{InvitePending, InviteExpired}) {
+			t.Errorf("heard %v", got)
+		}
+	})
+	t.Run("the room closes, then the sweep", func(t *testing.T) {
+		g, room := standardRoom(t)
+		decodeInvite(t, g.invite("room1", "bob", "alice"))
+		room.Close()
+		g.advance(InviteTTL + time.Second)
+		g.h.hub.Reap(g.clock, emptyGrace)
+		if got := states(g.nudges("alice")); !sameStates(got, []InviteState{InvitePending, InviteExpired}) {
+			t.Errorf("heard %v", got)
+		}
+	})
+	t.Run("the sweep closes the room, then the hour passes", func(t *testing.T) {
+		g, room := standardRoom(t)
+		decodeInvite(t, g.invite("room1", "bob", "alice"))
+		room.Leave("host", g.clock)
+		room.Leave("bob", g.clock)
+		g.advance(emptyGrace + time.Second)
+		if n := g.h.hub.Reap(g.clock, emptyGrace); n != 1 {
+			t.Fatalf("reaped %d", n)
+		}
+		g.advance(InviteTTL)
+		g.h.hub.Reap(g.clock, emptyGrace)
+		if got := states(g.nudges("alice")); !sameStates(got, []InviteState{InvitePending, InviteExpired}) {
+			t.Errorf("heard %v", got)
+		}
+	})
+	t.Run("a new ask settles the old one", func(t *testing.T) {
+		g, _ := standardRoom(t)
+		decodeInvite(t, g.invite("room1", "bob", "alice"))
+		g.advance(InviteTTL)
+		decodeInvite(t, g.invite("room1", "bob", "alice")) // finds the old one lapsed
+		g.h.hub.Reap(g.clock, emptyGrace)
+		if got := states(g.nudges("alice")); !sameStates(got, []InviteState{InvitePending, InviteExpired, InvitePending}) {
+			t.Errorf("heard %v", got)
+		}
+	})
+}
+
+// Nothing may depend on anyone listening: with no nudge at all, closing a room and
+// sweeping still settle every invite, and nothing panics or is left half-done.
+func TestExpirySettlesWithNobodyListening(t *testing.T) {
+	g, room := standardRoom(t)
+	a := decodeInvite(t, g.invite("room1", "bob", "alice"))
+	g.h.nudge = nil
+
+	room.Close()
+	if got := g.list("alice"); len(got) != 0 {
+		t.Fatalf("listed: %+v", got)
+	}
+	if rec := g.accept("alice", a.ID); rec.Code != http.StatusGone {
+		t.Fatalf("accept: status = %d", rec.Code)
+	}
+
+	g2, _ := standardRoom(t)
+	b := decodeInvite(t, g2.invite("room1", "bob", "alice"))
+	g2.h.nudge = nil
+	g2.advance(InviteTTL + time.Second)
+	g2.h.hub.Reap(g2.clock, emptyGrace)
+	if rec := g2.accept("alice", b.ID); rec.Code != http.StatusNotFound {
+		t.Fatalf("accept after the sweep: status = %d", rec.Code)
+	}
+	g2.h.hub.invites.mu.Lock()
+	left := len(g2.h.hub.invites.byUser)
+	g2.h.hub.invites.mu.Unlock()
+	if left != 0 {
+		t.Errorf("index still holds %d user(s)", left)
+	}
+}

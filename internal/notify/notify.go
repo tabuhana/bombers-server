@@ -86,7 +86,10 @@ const (
 	// "from", "from_name", "to", "to_name", "state", "expires_at"}, and its `state`
 	// says which change this is: "pending" to the invitee when it is made,
 	// "accepted" or "declined" to the inviter AND the answerer when answered (the
-	// answerer's other windows settle on the same answer). One kind for every
+	// answerer's other windows settle on the same answer), and "expired" to the
+	// invitee ALONE when a pending invite lapses - its room ended, or its hour ran
+	// out. The inviter is not told of an expiry: a room they were in ending is
+	// something they can see, and nobody asked them a question. One kind for every
 	// change, like KindDM. It carries content because it is addressed to exactly the
 	// two people it concerns, whose ids come from the invite itself — and it is
 	// STILL only a nudge: the server holds the invite and GET /invites lists it, so
