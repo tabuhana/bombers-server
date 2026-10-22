@@ -1,8 +1,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/tabuhana/bombers-server/internal/transfers"
@@ -25,6 +28,30 @@ const (
 	SignupList = "list"
 	// SignupOpen — anyone who signs in with Discord.
 	SignupOpen = "open"
+)
+
+// SignupRequiresAllowlist is the one place that decides whether a newcomer
+// must be on the allowlist, and it decides by asking whether the mode is
+// EXACTLY "open". Anything else — "list", but also a typo, a different case, or
+// an empty value — keeps the allowlist in force. The test is written this way
+// round on purpose: comparing against "list" instead makes every value that is
+// not "list" mean "no allowlist", so a typo opens the door. The mode is read on
+// every sign-in, so a bad value has to fail closed here, not just be rejected at
+// boot.
+func SignupRequiresAllowlist(mode string) bool {
+	return mode != SignupOpen
+}
+
+// The accepted values of the two backend selectors. They are compared exactly
+// (after trimming whitespace): "Embedded" or "FS" is refused, not corrected,
+// because guessing which backend someone meant is how a server ends up pointed
+// at the wrong database.
+const (
+	DBExternal = "external"
+	DBEmbedded = "embedded"
+
+	MediaS3 = "s3"
+	MediaFS = "fs"
 )
 
 type Config struct {
@@ -111,7 +138,25 @@ type Config struct {
 	ICEStunURLs []string
 }
 
+// Load reads and CHECKS the whole environment, and it is the only place that
+// does: the server runs it first thing in boot, before Postgres or any pool or
+// store is touched, so a bad variable stops the server there with an error that
+// names the variable and the value it was given. Nothing downstream should have
+// to discover that a variable was wrong.
+//
+// It reports every problem it finds at once, on one line, so fixing a
+// misconfigured install is one pass and not one restart per typo. A problem is
+// never reported against the wrong variable: when DB_BACKEND or MEDIA_BACKEND is
+// itself invalid, the variables that depend on which backend was chosen
+// (DATABASE_URL, the S3 keys) are not demanded, because nobody knows yet whether
+// they are needed.
+//
+// `doctor`, `backup`, `update` and the console all call this, so everything here
+// is a hard failure for all of them.
 func Load() (*Config, error) {
+	var problems []string
+	fail := func(err error) { problems = append(problems, err.Error()) }
+
 	var missing []string
 	require := func(key string) string {
 		v := os.Getenv(key)
@@ -131,10 +176,15 @@ func Load() (*Config, error) {
 	// DATABASE_URL is required). "embedded" runs a local Postgres the server
 	// starts itself, which supplies the connection — so no DATABASE_URL is
 	// needed. requireDB marks DATABASE_URL required only for the external
-	// backend, mirroring requireS3 below.
-	dbBackend := optional("DB_BACKEND", "external")
+	// backend, mirroring requireS3 below. If the value is not one of the two,
+	// dbBackend is "" and neither case applies: the bad value is the only thing
+	// reported, not a missing DATABASE_URL it caused.
+	dbBackend, err := oneOf("DB_BACKEND", DBExternal, DBExternal, DBEmbedded)
+	if err != nil {
+		fail(err)
+	}
 	requireDB := func(key string) string {
-		if dbBackend == "external" {
+		if dbBackend == DBExternal {
 			return require(key)
 		}
 		return os.Getenv(key)
@@ -142,21 +192,38 @@ func Load() (*Config, error) {
 
 	// MediaBackend defaults to "s3", preserving the managed path (S3 creds
 	// required). "fs" stores media as local files and needs no S3 credentials.
-	mediaBackend := optional("MEDIA_BACKEND", "s3")
+	mediaBackend, err := oneOf("MEDIA_BACKEND", MediaS3, MediaS3, MediaFS)
+	if err != nil {
+		fail(err)
+	}
 	// requireS3 marks an S3 credential key required only when the S3 backend is
 	// actually selected, so a filesystem self-host user is never forced to
 	// invent S3 keys just to pass config validation.
 	requireS3 := func(key string) string {
-		if mediaBackend == "s3" {
+		if mediaBackend == MediaS3 {
 			return require(key)
 		}
 		return os.Getenv(key)
 	}
 
+	// SIGNUP_MODE is read again on every sign-in (settings.Resolve), so this is
+	// not the only guard — SignupRequiresAllowlist fails closed — but it is the
+	// one that tells the operator at boot, with the value, instead of leaving a
+	// typo to be silently treated as "list".
+	signupMode, err := oneOf("SIGNUP_MODE", SignupList, SignupList, SignupOpen)
+	if err != nil {
+		fail(err)
+	}
+
+	listenPort, err := port("PORT", defaultPort)
+	if err != nil {
+		fail(err)
+	}
+
 	cfg := &Config{
 		AutoMigrate:       truthy(optional("AUTO_MIGRATE", "")),
 		Host:              optional("HOST", ""),
-		Port:              optional("PORT", defaultPort),
+		Port:              listenPort,
 		DatabaseURL:       requireDB("DATABASE_URL"),
 		DBBackend:         dbBackend,
 		TokenSecret:       require("TOKEN_SECRET"),
@@ -169,7 +236,7 @@ func Load() (*Config, error) {
 		DiscordClientSecret: os.Getenv("DISCORD_CLIENT_SECRET"),
 		DiscordRedirectURL:  os.Getenv("DISCORD_REDIRECT_URL"),
 		WebsiteURL:          os.Getenv("WEBSITE_URL"),
-		SignupMode:          optional("SIGNUP_MODE", SignupList),
+		SignupMode:          signupMode,
 		MediaBackend:        mediaBackend,
 		MediaDir:            optional("MEDIA_DIR", ""),
 		S3Endpoint:          optional("S3_ENDPOINT", defaultS3Endpoint),
@@ -180,7 +247,19 @@ func Load() (*Config, error) {
 	}
 
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
+		problems = append(problems, fmt.Sprintf("missing required environment variables: %s", strings.Join(missing, ", ")))
+	}
+
+	// The endpoint's SHAPE only. Whether anything answers there, and whether the
+	// keys are good, can only be learned over the network, and a server that
+	// refuses to boot because the object store was briefly unreachable is worse
+	// than one that finds out when it first uses it — so that stays with the
+	// media store. It is checked only for the s3 backend: a filesystem install
+	// has no use for the variable and must not be stopped by a stale one.
+	if mediaBackend == MediaS3 {
+		if err := checkS3Endpoint(cfg.S3Endpoint); err != nil {
+			fail(err)
+		}
 	}
 
 	// Checked here, with the rest of the configuration, so that a typo (or a TURN
@@ -188,10 +267,99 @@ func Load() (*Config, error) {
 	// names the variable; ParseSTUN's own text names the offending value.
 	stun, err := transfers.ParseSTUN(os.Getenv("ICE_STUN_URLS"))
 	if err != nil {
-		return nil, fmt.Errorf("ICE_STUN_URLS: %w", err)
+		fail(fmt.Errorf("ICE_STUN_URLS: %w", err))
 	}
 	cfg.ICEStunURLs = stun
+
+	if len(problems) > 0 {
+		return nil, errors.New(strings.Join(problems, "; "))
+	}
 	return cfg, nil
+}
+
+// oneOf reads an enumerated variable: unset or blank means the fallback, one of
+// the accepted values (exactly, case included) is that value, and anything else
+// is an error naming the variable, the value as given, and what would have been
+// accepted. It never maps a near miss to a neighbour.
+func oneOf(key, fallback string, accepted ...string) (string, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback, nil
+	}
+	for _, a := range accepted {
+		if v == a {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("%s=%q is not a recognised value (accepted: %s)", key, v, strings.Join(accepted, ", "))
+}
+
+// port reads a TCP port variable: unset or blank means the fallback, otherwise
+// plain decimal digits in 1-65535. Port 0 is refused — it asks the OS for a
+// random port, and nothing that is told where the server is (the console, the
+// Caddyfile the wizard prints, a platform's health check) could find it.
+func port(key, fallback string) (string, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback, nil
+	}
+	n, ok := parsePort(v)
+	if !ok {
+		return "", fmt.Errorf("%s=%q is not a port number (a whole number from 1 to 65535)", key, v)
+	}
+	return strconv.Itoa(n), nil
+}
+
+// parsePort accepts only ASCII digits, so "+80", "-1", "8 0" and "0x50" are not
+// ports even though strconv would take some of them.
+func parsePort(s string) (int, bool) {
+	// Five digits cover 65535; the length cap also stops "00000080" being
+	// quietly accepted as 80.
+	if s == "" || len(s) > 5 {
+		return 0, false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > 65535 {
+		return 0, false
+	}
+	return n, true
+}
+
+// checkS3Endpoint validates the shape minio-go wants: host or host:port, no
+// scheme (S3_USE_SSL chooses http or https), no path, credentials or query.
+func checkS3Endpoint(endpoint string) error {
+	bad := func(why string) error {
+		return fmt.Errorf("S3_ENDPOINT=%q is not a usable endpoint: %s", endpoint, why)
+	}
+	if strings.TrimSpace(endpoint) != endpoint || strings.ContainsAny(endpoint, " \t\r\n") {
+		return bad("it contains whitespace")
+	}
+	if strings.Contains(endpoint, "://") {
+		return bad("give host or host:port without a scheme; S3_USE_SSL chooses http or https")
+	}
+	u, err := url.Parse("http://" + endpoint)
+	if err != nil {
+		return bad("it does not parse as host or host:port")
+	}
+	if u.Hostname() == "" {
+		return bad("it has no host")
+	}
+	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return bad("give only host or host:port, with no path, credentials or query")
+	}
+	if p := u.Port(); p != "" {
+		if _, ok := parsePort(p); !ok {
+			return bad("the port must be a whole number from 1 to 65535")
+		}
+	} else if strings.HasSuffix(u.Host, ":") {
+		return bad("it ends in a colon with no port")
+	}
+	return nil
 }
 
 // truthy reads the usual spellings of "yes" for a boolean env var.

@@ -288,7 +288,11 @@ func (h *DiscordHandler) noAccount(w http.ResponseWriter, r *http.Request, pendi
 		return
 	}
 
-	if h.signupMode(ctx) == config.SignupList {
+	// Only an exact "open" skips the allowlist. This used to ask whether the mode
+	// WAS "list", which made every other value (a typo, "List", "closed") mean
+	// "no allowlist": the mode is read from the environment or the settings
+	// table on every sign-in, so an unrecognised value must land on the closed side.
+	if config.SignupRequiresAllowlist(h.signupMode(ctx)) {
 		allowed, aerr := IsAllowed(ctx, h.pool, profile.ID)
 		if aerr != nil {
 			logx.Error("discord: allowlist check for %s: %v", profile.ID, aerr)

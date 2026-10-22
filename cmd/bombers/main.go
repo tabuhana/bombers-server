@@ -1230,6 +1230,11 @@ func runDoctor(_ []string) {
 		mark(markFAIL, "Architecture", "embedded Postgres needs a 64-bit build (this is 32-bit); rebuild with `GOARCH=amd64 go build`, or use external Postgres.")
 	case dbBackend == "embedded":
 		mark(markOK, "Architecture", fmt.Sprintf("64-bit (%s) — embedded Postgres supported", runtime.GOARCH))
+	case dbBackend != config.DBExternal:
+		// Neither "external" nor "embedded": config.Load refused it (see the
+		// Configuration line). Saying "external database" here would be a second,
+		// false diagnosis next to the true one.
+		mark(markSkip, "Architecture", "DB_BACKEND is not a recognised value — see Configuration")
 	default:
 		mark(markSkip, "Architecture", "external database — no architecture constraint")
 	}
