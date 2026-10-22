@@ -41,7 +41,7 @@ func NewHandler(stun []string) (*Handler, error) {
 
 // DefaultSTUN is what GET /ice answers with when the operator has configured
 // nothing: the same public STUN servers the client carried before the server
-// handed out its own list, so a server that never sets ICE_STUN_URLS changes
+// handed out its own list, so a server that never sets STUN_SERVERS changes
 // nothing for anyone.
 var DefaultSTUN = []string{
 	"stun:stun.l.google.com:19302",
@@ -80,7 +80,7 @@ func (h *Handler) ICE(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, iceResponse{ICEServers: []iceServer{{URLs: h.ice}}})
 }
 
-// ParseSTUN reads the operator's ICE_STUN_URLS (config.Load calls it, so a bad
+// ParseSTUN reads the operator's STUN_SERVERS (config.Load calls it, so a bad
 // value stops the server at the very start of boot): a comma-separated list of
 // `stun:host[:port]` or `stuns:host[:port]` URLs. Empty (or only blanks) means
 // DefaultSTUN. Anything else — a malformed URL, a bad port, and above all a
