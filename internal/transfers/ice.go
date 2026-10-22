@@ -20,16 +20,23 @@ type Handler struct {
 	ice []string
 }
 
-// NewHandler builds the handler. stunCSV is the operator's ICE_STUN_URLS (empty
-// means DefaultSTUN); it is checked here, and an entry that is not a stun: or
-// stuns: URL — a TURN server above all — is an error rather than something
-// served to every client.
-func NewHandler(stunCSV string) (*Handler, error) {
-	stun, err := ParseSTUN(stunCSV)
-	if err != nil {
-		return nil, err
+// NewHandler builds the handler from the list config.Load already parsed (nil
+// or empty means DefaultSTUN). Every entry is checked again anyway: whatever
+// built the list, an entry that is not a stun: or stuns: URL — a TURN server
+// above all — is an error here rather than something served to every client.
+func NewHandler(stun []string) (*Handler, error) {
+	if len(stun) == 0 {
+		stun = DefaultSTUN
 	}
-	return &Handler{ice: stun}, nil
+	out := make([]string, 0, len(stun))
+	for _, u := range stun {
+		clean, err := cleanSTUN(u)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, clean)
+	}
+	return &Handler{ice: out}, nil
 }
 
 // DefaultSTUN is what GET /ice answers with when the operator has configured
@@ -73,7 +80,8 @@ func (h *Handler) ICE(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, iceResponse{ICEServers: []iceServer{{URLs: h.ice}}})
 }
 
-// ParseSTUN reads the operator's ICE_STUN_URLS: a comma-separated list of
+// ParseSTUN reads the operator's ICE_STUN_URLS (config.Load calls it, so a bad
+// value stops the server at the very start of boot): a comma-separated list of
 // `stun:host[:port]` or `stuns:host[:port]` URLs. Empty (or only blanks) means
 // DefaultSTUN. Anything else — a malformed URL, a bad port, and above all a
 // `turn:` or `turns:` URL — is an error, so a mistake stops the server from

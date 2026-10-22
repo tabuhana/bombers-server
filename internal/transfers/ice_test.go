@@ -31,7 +31,7 @@ func getICE(t *testing.T, h *Handler, signedIn bool) *httptest.ResponseRecorder 
 }
 
 func TestICEDefaultsToTheStunListTheClientAlreadyUsed(t *testing.T) {
-	h, err := NewHandler("")
+	h, err := NewHandler(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestICEDefaultsToTheStunListTheClientAlreadyUsed(t *testing.T) {
 }
 
 func TestICEServesTheConfiguredListAndOnlyThat(t *testing.T) {
-	h, err := NewHandler(" stun:stun.example.org:3478 , STUNS:[2001:db8::1]:5349,stun:10.0.0.5, ")
+	h, err := NewHandler(mustParse(t, " stun:stun.example.org:3478 , STUNS:[2001:db8::1]:5349,stun:10.0.0.5, "))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestICEServesTheConfiguredListAndOnlyThat(t *testing.T) {
 // The wire shape is {"iceServers":[{"urls":[...]}]} and nothing else: no
 // username, no credential, which exist only for TURN.
 func TestICEResponseCarriesNoCredentialFields(t *testing.T) {
-	h, _ := NewHandler("")
+	h, _ := NewHandler(nil)
 	var raw map[string]any
 	if err := json.Unmarshal(getICE(t, h, true).Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
@@ -91,14 +91,25 @@ func TestICEResponseCarriesNoCredentialFields(t *testing.T) {
 }
 
 func TestICEIsBehindAuthentication(t *testing.T) {
-	h, _ := NewHandler("")
+	h, _ := NewHandler(nil)
 	if rec := getICE(t, h, false); rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
 	}
 }
 
+func mustParse(t *testing.T, csv string) []string {
+	t.Helper()
+	out, err := ParseSTUN(csv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 // A TURN server is never served, however it is spelled: the whole design is that
-// no transfer byte is relayed, and a TURN entry is a relay.
+// no transfer byte is relayed, and a TURN entry is a relay. It is refused twice —
+// when the configuration is parsed, and again by the handler, so a list built by
+// anything else cannot smuggle one in.
 func TestNoTurnServerCanBeConfigured(t *testing.T) {
 	for _, v := range []string{
 		"turn:turn.example.org:3478",
@@ -109,10 +120,15 @@ func TestNoTurnServerCanBeConfigured(t *testing.T) {
 		"turn:user@turn.example.org",
 		"turn:turn.example.org?transport=udp",
 	} {
-		if _, err := NewHandler(v); err == nil {
-			t.Errorf("ICE_STUN_URLS=%q was accepted", v)
-		} else if !strings.Contains(strings.ToLower(err.Error()), "turn") && !strings.Contains(err.Error(), "stun") {
-			t.Errorf("ICE_STUN_URLS=%q: unhelpful error %v", v, err)
+		if _, err := ParseSTUN(v); err == nil {
+			t.Errorf("ParseSTUN(%q) accepted it", v)
+		}
+		var list []string
+		for _, e := range strings.Split(v, ",") {
+			list = append(list, strings.TrimSpace(e))
+		}
+		if _, err := NewHandler(list); err == nil {
+			t.Errorf("NewHandler(%q) accepted it", list)
 		}
 	}
 }

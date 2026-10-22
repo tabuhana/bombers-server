@@ -431,9 +431,9 @@ func buildAndServe() (*app, error) {
 	// The STUN list a peer-to-peer transfer connects with (GET /ice).
 	transfersHandler, err := transfers.NewHandler(cfg.ICEStunURLs)
 	if err != nil {
-		// A bad ICE list is an operator mistake, and serving a list that cannot work
-		// (or a TURN one) to every client is worse than not starting. The DB is
-		// already live by here, so release it as the media failure above does.
+		// config.Load already refused a bad ICE list, so this cannot happen from the
+		// environment; it stands as the backstop for the handler's own check. The DB
+		// is live by here, so release it as the media failure above does.
 		pool.Close()
 		if epg != nil {
 			_ = epg.Stop()
