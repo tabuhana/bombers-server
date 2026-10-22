@@ -53,6 +53,7 @@ type fakeDB struct {
 	commits     int
 	rollbacks   int
 	beginErr    error
+	commitErr   error  // returned by Commit AFTER the writes took effect: a commit whose answer was lost
 	failOnQuery string // an SQL constant whose execution returns an error
 }
 
@@ -250,6 +251,8 @@ func (d *fakeDB) queryRow(sql string, args []any, inTx bool) pgx.Row {
 	switch sql {
 	case userExistsSQL:
 		return fakeRow{vals: []any{d.users[args[0].(string)]}}
+	case messageExistsSQL:
+		return fakeRow{vals: []any{d.find(args[0].(string)) != nil}}
 	case areFriendsSQL:
 		return fakeRow{vals: []any{d.friends[pair(args[0].(string), args[1].(string))]}}
 	case markReadSQL:
@@ -768,7 +771,7 @@ func (t *fakeTx) Commit(_ context.Context) error {
 	t.db.mu.Lock()
 	defer t.db.mu.Unlock()
 	t.db.commits++
-	return nil
+	return t.db.commitErr
 }
 
 func (t *fakeTx) Rollback(_ context.Context) error {

@@ -8,11 +8,13 @@ import (
 	"fmt"
 
 	"github.com/oklog/ulid/v2"
+
+	"github.com/tabuhana/bombers-server/internal/imagesize"
 )
 
 // A message has a KIND. Today there are three, a closed set (the column has a CHECK
 // that says so): text, which is everything a person types; invite, which says "come
-// to my room"; and image, which is not written by anything yet.
+// to my room"; and image, which is a picture.
 //
 // THE RULE: A CLIENT CANNOT DECLARE A KIND. POST /messages is text-only and refuses a
 // request that names any other. If a client could post an invite with a room id in its
@@ -20,7 +22,8 @@ import (
 // `bombers://room/<id>` shortcut that was deleted - a thing the server holds no state
 // about and anyone can forge. The server MINTS the non-text kinds itself, from state it
 // owns: an invite message is written when the invite is made (MintInvite), and an
-// image message will be written by an endpoint that checks the media is the caller's.
+// image message is written by SendImage (image.go) from bytes it has itself read,
+// sniffed and measured - a client supplies a picture, never a claim about one.
 const (
 	kindText   = "text"
 	kindInvite = "invite"
@@ -31,8 +34,6 @@ var (
 	// errUnknownKind is a kind outside the closed set. The column can never hold a
 	// word nothing renders because nothing here writes one.
 	errUnknownKind = errors.New("unknown message kind")
-	// errKindNotMintable is a kind in the set that nothing writes yet.
-	errKindNotMintable = errors.New("message kind cannot be written yet")
 	// errBadPayload is a payload that is not the shape its kind has.
 	errBadPayload = errors.New("payload does not fit the message kind")
 )
@@ -47,6 +48,55 @@ type invitePayload struct {
 	RoomName string `json:"room_name"`
 }
 
+// imagePayload is what an image message carries. It names no object: the bytes live
+// under the message's own id (imageKey), so there is no reference to point at the
+// wrong picture, to outlive the message or to be shared between two. Width and height
+// are required because a client that does not know them reflows the thread as each
+// picture loads; they are read from the bytes (imagesize), never supplied. Size is the
+// length of what was stored, which is what the bytes are served with.
+type imagePayload struct {
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	Mime   string `json:"mime"`
+	Size   int    `json:"size"`
+}
+
+const (
+	// maxImageBytes is the most one picture may be, the same as a profile banner.
+	maxImageBytes = 10 << 20
+	// maxImagePixels is the most a picture may ask a client to hold decoded. The server
+	// never decodes one, so the cap on bytes says nothing about this: a few kilobytes of
+	// PNG can declare a canvas of billions of pixels, which the other person's client
+	// would be asked to allocate. 100 megapixels is past any photograph or screenshot
+	// and well inside what a webview will decode.
+	maxImagePixels = 100_000_000
+)
+
+// check is the shape an image payload must have to be stored. That Size is the length
+// of the bytes actually stored is not something it can see: SendImage builds the
+// payload from the very slice it writes, so the two cannot differ.
+func (p imagePayload) check() error {
+	switch {
+	case p.Width < 1 || p.Height < 1:
+		return fmt.Errorf("%w: image needs a positive width and height", errBadPayload)
+	case int64(p.Width)*int64(p.Height) > maxImagePixels:
+		return fmt.Errorf("%w: image is more than %d pixels", errBadPayload, maxImagePixels)
+	case !imagesize.Accepts(p.Mime):
+		return fmt.Errorf("%w: image mime %q", errBadPayload, p.Mime)
+	case p.Size < 1 || p.Size > maxImageBytes:
+		return fmt.Errorf("%w: image size %d", errBadPayload, p.Size)
+	}
+	return nil
+}
+
+// decodeStrict reads payload as exactly one JSON document of the shape of v: no field v
+// does not have, nothing after it.
+func decodeStrict(payload []byte, v any) bool {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v) == nil && !dec.More()
+}
+
 // checkKindPayload is the one place that says what a kind may carry. The server
 // does not interpret a payload beyond this: it refuses a kind it does not know, and a
 // payload that is not the shape of the kind it is storing.
@@ -58,10 +108,8 @@ func checkKindPayload(kind string, payload []byte) error {
 		}
 		return nil
 	case kindInvite:
-		dec := json.NewDecoder(bytes.NewReader(payload))
-		dec.DisallowUnknownFields()
 		var p invitePayload
-		if err := dec.Decode(&p); err != nil || dec.More() {
+		if !decodeStrict(payload, &p) {
 			return fmt.Errorf("%w: invite", errBadPayload)
 		}
 		if p.InviteID == "" || p.Room == "" || p.RoomName == "" {
@@ -69,7 +117,11 @@ func checkKindPayload(kind string, payload []byte) error {
 		}
 		return nil
 	case kindImage:
-		return errKindNotMintable
+		var p imagePayload
+		if !decodeStrict(payload, &p) {
+			return fmt.Errorf("%w: image", errBadPayload)
+		}
+		return p.check()
 	}
 	return errUnknownKind
 }

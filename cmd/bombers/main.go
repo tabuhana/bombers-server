@@ -426,8 +426,9 @@ func buildAndServe() (*app, error) {
 	profilesHandler := profiles.NewHandler(pool, profileNudge)
 	// A direct message carries its content to both people in the conversation
 	// (see the notify package for why this kind alone does), so messaging is
-	// handed the hub's fan-out as it is.
-	messagingHandler := messaging.NewHandler(pool, notifyHub.SendMany)
+	// handed the hub's fan-out as it is, and the media store, where a picture's bytes
+	// live (it declares the slice of it that it needs, and does not import media).
+	messagingHandler := messaging.NewHandler(pool, notifyHub.SendMany, storage)
 	// The STUN list a peer-to-peer transfer connects with (GET /ice).
 	transfersHandler, err := transfers.NewHandler(cfg.ICEStunURLs)
 	if err != nil {
@@ -537,6 +538,10 @@ func buildAndServe() (*app, error) {
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.MessagesWrite))
 			r.Post("/messages", messagingHandler.Send)
+			// A picture is the other way to send: raw bytes in the body, the recipient and
+			// nonce in the query. Static, so it wins over /messages/{userID}/... the way
+			// /messages/unread does.
+			r.Post("/messages/image", messagingHandler.SendImage)
 			r.Patch("/messages/{messageID}", messagingHandler.Edit)
 			r.Delete("/messages/{messageID}", messagingHandler.Delete)
 			// Either person in a conversation may pin or unpin either one's message.
@@ -559,6 +564,8 @@ func buildAndServe() (*app, error) {
 			r.Get("/messages/search", messagingHandler.Search)
 			r.Get("/messages/{userID}", messagingHandler.History)
 			r.Get("/messages/{userID}/pins", messagingHandler.Pins)
+			// A picture, through the server like every other byte: never a bucket URL.
+			r.Get("/messages/{messageID}/image", messagingHandler.ServeImage)
 			r.Get("/conversations", messagingHandler.Conversations)
 		})
 		// Token scope: the cards you keep about people — the most personal thing here.

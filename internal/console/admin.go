@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/tabuhana/bombers-server/internal/admin"
+	"github.com/tabuhana/bombers-server/internal/messaging"
 )
 
 // Operator commands that CHANGE a user: ban, unban, delete.
@@ -114,6 +115,15 @@ func runDeleteUser(ctx context.Context, c *Console, args []string) error {
 		return nil
 	}
 
+	// Their pictures are named by the messages that carry them, and the cascade below
+	// takes those rows, so the names have to be read first. A picture sent in the
+	// instant between this read and the delete is not covered; `ban` first if that
+	// matters.
+	pictures, err := userImageMessageIDs(ctx, c, id)
+	if err != nil {
+		return err
+	}
+
 	tag, err := c.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
@@ -122,7 +132,61 @@ func runDeleteUser(ctx context.Context, c *Console, args []string) error {
 		return fmt.Errorf("no user %q", args[0])
 	}
 	fmt.Fprintf(c.out, "  deleted %s\n", username)
+	// Its own deadline: the command's began before the operator was asked to confirm,
+	// and a person with many pictures is more than a command's worth of removals.
+	rmCtx, cancel := context.WithTimeout(context.Background(), imageRemovalTimeout)
+	defer cancel()
+	if failed := removeMessageImages(rmCtx, c.media, pictures); failed > 0 {
+		fmt.Fprintf(c.out, "  could not remove %d of %d message pictures from the object store; they are unreachable now and only take up space\n", failed, len(pictures))
+	}
 	return nil
+}
+
+// imageRemovalTimeout bounds taking all of a deleted account's pictures out of the
+// object store.
+const imageRemovalTimeout = 2 * time.Minute
+
+// userImageIDsSQL names every picture a user is a party to, as sender or recipient:
+// deleting the user removes the messages of both. A tombstone is included on purpose,
+// since its bytes may be the ones a failed delete left behind, and removing a prefix
+// that holds nothing is a no-op.
+const userImageIDsSQL = `SELECT id FROM messages WHERE kind = 'image' AND (sender_id = $1 OR recipient_id = $1)`
+
+func userImageMessageIDs(ctx context.Context, c *Console, userID string) ([]string, error) {
+	rows, err := c.pool.Query(ctx, userImageIDsSQL, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list message pictures: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan message picture: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate message pictures: %w", err)
+	}
+	return ids, nil
+}
+
+// removeMessageImages takes the pictures of the given messages out of the object store
+// and returns how many it could not. Best-effort by the same reasoning as everywhere a
+// picture is removed: the rows are gone, the account is deleted, and a failure here
+// leaves bytes nothing can reach, which is waste and not a fault. With no store (a
+// console that was not given one) there is nothing to remove from.
+func removeMessageImages(ctx context.Context, store objectStore, messageIDs []string) (failed int) {
+	if store == nil {
+		return 0
+	}
+	for _, id := range messageIDs {
+		if err := store.RemovePrefix(ctx, messaging.ImagePrefix(id)); err != nil {
+			failed++
+		}
+	}
+	return failed
 }
 
 // runBanned lists who is currently banned and why.

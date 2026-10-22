@@ -14,6 +14,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
+	"github.com/tabuhana/bombers-server/internal/imagesize"
 	"github.com/tabuhana/bombers-server/internal/logx"
 	"github.com/tabuhana/bombers-server/internal/types"
 )
@@ -30,16 +31,6 @@ const (
 	errMediaTooLarge        = "media_too_large"
 	errMediaNotFound        = "media_not_found"
 )
-
-// allowedContentTypes is the accept-list for uploads, keyed by the type
-// http.DetectContentType sniffs from the actual bytes — the declared header is
-// ignored, so a mislabeled or malicious body can't smuggle a non-image in.
-var allowedContentTypes = map[string]bool{
-	"image/png":  true,
-	"image/jpeg": true,
-	"image/gif":  true,
-	"image/webp": true,
-}
 
 // Notify is called when an upload or a delete changes what a user's card looks
 // like, so the friends holding a copy of it stop showing the old picture.
@@ -136,8 +127,11 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The type is sniffed from the bytes and the declared header is ignored, so a
+	// mislabeled or malicious body can't smuggle a non-image in. The accept-list is
+	// imagesize's, shared with message images so the two can't disagree.
 	contentType := http.DetectContentType(data)
-	if !allowedContentTypes[contentType] {
+	if !imagesize.Accepts(contentType) {
 		httpx.WriteError(w, http.StatusUnsupportedMediaType, errUnsupportedMediaType)
 		return
 	}

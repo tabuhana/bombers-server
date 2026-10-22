@@ -107,15 +107,17 @@ func sorted(ids []string) []string {
 // `GET /messages`, `GET /messages/{userID}` and `PATCH|DELETE /messages/{messageID}`
 // side by side.
 type env struct {
-	db *fakeDB
-	ln *listener
-	h  *Handler
+	db   *fakeDB
+	ln   *listener
+	h    *Handler
+	objs *fakeObjects
 }
 
 func newEnv(users ...string) *env {
 	db := newFakeDB(users...)
 	ln := &listener{}
-	return &env{db: db, ln: ln, h: newHandler(db, db.begin, ln.notify)}
+	objs := newFakeObjects()
+	return &env{db: db, ln: ln, h: newHandler(db, db.begin, ln.notify, objs), objs: objs}
 }
 
 func (e *env) router(userID string) http.Handler {
@@ -126,12 +128,14 @@ func (e *env) router(userID string) http.Handler {
 		})
 	})
 	r.Post("/messages", e.h.Send)
+	r.Post("/messages/image", e.h.SendImage)
 	r.Patch("/messages/{messageID}", e.h.Edit)
 	r.Delete("/messages/{messageID}", e.h.Delete)
 	r.Get("/messages", e.h.Updates)
 	r.Get("/messages/unread", e.h.Unread)
 	r.Get("/messages/{userID}", e.h.History)
 	r.Get("/messages/{userID}/pins", e.h.Pins)
+	r.Get("/messages/{messageID}/image", e.h.ServeImage)
 	r.Put("/messages/{messageID}/pin", e.h.Pin)
 	r.Delete("/messages/{messageID}/pin", e.h.Unpin)
 	r.Put("/messages/{messageID}/reactions", e.h.AddReaction)
@@ -649,7 +653,7 @@ func TestSendRefusals(t *testing.T) {
 func TestSendWithNoListenerStillStores(t *testing.T) {
 	db := newFakeDB("u1", "u2")
 	db.befriend("u1", "u2")
-	e := &env{db: db, ln: &listener{}, h: newHandler(db, db.begin, nil)}
+	e := &env{db: db, ln: &listener{}, h: newHandler(db, db.begin, nil, nil)}
 
 	rec := e.do("u1", http.MethodPost, "/messages", jsonBody(t, map[string]any{"recipient_id": "u2", "body": "hi"}))
 	if rec.Code != http.StatusCreated || len(db.msgs) != 1 {
@@ -1045,6 +1049,7 @@ func TestEditAndDeleteNeedASignedInUser(t *testing.T) {
 		"conversations": e.h.Conversations, "typing": e.h.Typing, "read": e.h.MarkRead, "history": e.h.History,
 		"pin": e.h.Pin, "unpin": e.h.Unpin, "pins": e.h.Pins,
 		"react": e.h.AddReaction, "unreact": e.h.RemoveReaction, "search": e.h.Search,
+		"send image": e.h.SendImage, "serve image": e.h.ServeImage,
 	} {
 		rec := httptest.NewRecorder()
 		call(rec, httptest.NewRequest(http.MethodGet, "/messages", strings.NewReader("{}")))
@@ -1859,7 +1864,7 @@ func TestTypingIsFriendGated(t *testing.T) {
 func TestTypingWithNoListenerIsStillA204(t *testing.T) {
 	db := newFakeDB("u1", "u2")
 	db.befriend("u1", "u2")
-	e := &env{db: db, ln: &listener{}, h: newHandler(db, db.begin, nil)}
+	e := &env{db: db, ln: &listener{}, h: newHandler(db, db.begin, nil, nil)}
 	if rec := e.do("u1", http.MethodPost, "/messages/u2/typing", ""); rec.Code != http.StatusNoContent {
 		t.Errorf("status = %d", rec.Code)
 	}
@@ -3183,7 +3188,7 @@ func TestASendWhoseResponseCannotBeBuiltIsRetrySafe(t *testing.T) {
 func TestNoListenerMeansNoFrameIsBuilt(t *testing.T) {
 	db := newFakeDB("u1", "u2")
 	db.befriend("u1", "u2")
-	e := &env{db: db, ln: &listener{}, h: newHandler(db, db.begin, nil)}
+	e := &env{db: db, ln: &listener{}, h: newHandler(db, db.begin, nil, nil)}
 
 	if rec := e.do("u1", http.MethodPost, "/messages", jsonBody(t, map[string]any{"recipient_id": "u2", "body": "hi"})); rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d", rec.Code)
@@ -3862,7 +3867,7 @@ func TestAReactionWithNoListenerStillStoresAndBuildsNoFrame(t *testing.T) {
 	db := newFakeDB("u1", "u2")
 	db.befriend("u1", "u2")
 	db.seed("m1", "u1", "u2", "hi")
-	e := &env{db: db, ln: &listener{}, h: newHandler(db, db.begin, nil)}
+	e := &env{db: db, ln: &listener{}, h: newHandler(db, db.begin, nil, nil)}
 
 	if rec := reactAs(t, e, "u2", "m1", "👍"); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)

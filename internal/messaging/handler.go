@@ -1,7 +1,7 @@
 // Package messaging owns direct messages: text DMs between two users, persisted
 // indefinitely in Postgres (DMs are not ephemeral; rooms are). A message has a kind
 // (kinds.go): what a person types is text, and the other kinds are minted by the
-// server, never declared by a client. Pictures wait for the later S3 phase. A
+// server, never declared by a client; a picture is one of them (image.go). A
 // message can answer an earlier one of the same conversation, and either person
 // can pin it or react to it. Live delivery carries the message: once a write is
 // stored, the Notify func
@@ -98,6 +98,9 @@ const (
 	errTooManyReactions = "too_many_reactions"
 	errEmptyQuery       = "empty_query"
 	errQueryTooLong     = "query_too_long"
+	errMessageTooLarge  = "message_too_large"
+	errInvalidImage     = "invalid_image"
+	errUnsupportedType  = "unsupported_media_type"
 	errRecipient        = "recipient_not_found"
 	errMessageNotFound  = "message_not_found"
 	// errBadCursor is a ?before= naming no message the caller may page from. It
@@ -141,18 +144,21 @@ const (
 type Notify func(userIDs []string, kind string, data any)
 
 type Handler struct {
-	db     dbExecutor
-	begin  beginFunc
-	notify Notify
+	db      dbExecutor
+	begin   beginFunc
+	notify  Notify
+	objects ObjectStore
 }
 
-func NewHandler(pool *pgxpool.Pool, notify Notify) *Handler {
-	return newHandler(pool, pool.Begin, notify)
+// NewHandler takes the object store the pictures live in (image.go). It is passed in
+// by main as the media store rather than imported, for the reason Notify is a func.
+func NewHandler(pool *pgxpool.Pool, notify Notify, objects ObjectStore) *Handler {
+	return newHandler(pool, pool.Begin, notify, objects)
 }
 
 // newHandler is the seam: a test builds a Handler over a fake database.
-func newHandler(db dbExecutor, begin beginFunc, notify Notify) *Handler {
-	return &Handler{db: db, begin: begin, notify: notify}
+func newHandler(db dbExecutor, begin beginFunc, notify Notify, objects ObjectStore) *Handler {
+	return &Handler{db: db, begin: begin, notify: notify, objects: objects}
 }
 
 // push delivers a frame to the listed users, if anything is wired up to hear it.
@@ -566,14 +572,7 @@ func (h *Handler) Send(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, errNonceTooLong)
 		return
 	}
-	if recipientID == "" || recipientID == senderID {
-		// Self-DM and missing target both collapse to the opaque recipient code.
-		httpx.WriteError(w, http.StatusNotFound, errRecipient)
-		return
-	}
-
-	if code := h.guardRecipient(r.Context(), senderID, recipientID); code != "" {
-		httpx.WriteError(w, http.StatusNotFound, code)
+	if !h.sendTarget(w, r, senderID, recipientID) {
 		return
 	}
 
@@ -592,25 +591,63 @@ func (h *Handler) Send(w http.ResponseWriter, r *http.Request) {
 		replyTo = &id
 	}
 
-	var created bool
-	saved, err := writeSeq(r.Context(), h.begin, func(tx dbExecutor) (*messageRecord, error) {
-		m, wasCreated, err := insertOnce(r.Context(), tx, &messageRecord{
-			ID:          ulid.Make().String(),
-			SenderID:    senderID,
-			RecipientID: recipientID,
-			Body:        body,
-			Nonce:       nonce,
-			ReplyToID:   replyTo,
-			Kind:        kindText, // never req.Kind: see sendMessageRequest
-		})
-		created = wasCreated
-		return m, err
+	saved, created, err := h.storeOnce(r.Context(), &messageRecord{
+		ID:          ulid.Make().String(),
+		SenderID:    senderID,
+		RecipientID: recipientID,
+		Body:        body,
+		Nonce:       nonce,
+		ReplyToID:   replyTo,
+		Kind:        kindText, // never req.Kind: see sendMessageRequest
 	})
 	if err != nil {
 		logx.Error("messaging: insert: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "could not send message")
 		return
 	}
+	h.answerSend(w, r, senderID, saved, created, nonce)
+}
+
+// sendTarget is the gate every send passes before anything is read or written: the
+// recipient must be somebody else and an accepted friend. Self-DM, a missing target and
+// every other refusal are the one opaque 404 recipient_not_found, so a send can't be
+// used to learn who exists. It writes that response itself and reports whether the send
+// may go on. SendImage goes through it too, so the two ways of sending cannot disagree
+// about who may be sent to.
+func (h *Handler) sendTarget(w http.ResponseWriter, r *http.Request, senderID, recipientID string) bool {
+	if recipientID == "" || recipientID == senderID {
+		httpx.WriteError(w, http.StatusNotFound, errRecipient)
+		return false
+	}
+	if code := h.guardRecipient(r.Context(), senderID, recipientID); code != "" {
+		httpx.WriteError(w, http.StatusNotFound, code)
+		return false
+	}
+	return true
+}
+
+// storeOnce is the write at the end of every send: the message goes in under the seq
+// lock, unless its sender already made one to the same recipient under the same nonce,
+// in which case that one comes back and created is false (insertOnce says why the
+// lookup is inside the lock). A send that was text and a send that was a picture both
+// end here, so neither can draw a seq, stamp a time or treat a nonce differently.
+func (h *Handler) storeOnce(ctx context.Context, m *messageRecord) (saved *messageRecord, created bool, err error) {
+	saved, err = writeSeq(ctx, h.begin, func(tx dbExecutor) (*messageRecord, error) {
+		got, wasCreated, err := insertOnce(ctx, tx, m)
+		created = wasCreated
+		return got, err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return saved, created, nil
+}
+
+// answerSend is what follows a stored send: tell both people if it is new, and answer
+// the sender with the message as they see it. A new message is 201 and is pushed; a
+// repeat under the same nonce is 200 with the message already stored and pushes
+// nothing, because the recipient already has it.
+func (h *Handler) answerSend(w http.ResponseWriter, r *http.Request, senderID string, saved *messageRecord, created bool, nonce string) {
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
@@ -732,6 +769,13 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.pushDM(r.Context(), opDelete, saved, "")
+	// A picture goes with its message: a tombstone that still served its picture
+	// would be a message that says nothing and shows everything. The row is the commit
+	// point and it has committed, so a failure to remove the bytes is logged and the
+	// delete still succeeds (removeImage says why).
+	if saved.Kind == kindImage {
+		h.removeImage(r.Context(), saved.ID)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1594,18 +1638,26 @@ func (h *Handler) guardRecipient(ctx context.Context, authedID, otherID string) 
 // not leave it stuck on somebody's message forever. The party check is never skipped,
 // so a non-participant is turned away the same way either way.
 func (h *Handler) guardParticipant(w http.ResponseWriter, r *http.Request, id, authedID string, needsFriend bool, failMsg string) bool {
+	_, ok := h.loadParticipant(w, r, id, authedID, needsFriend, failMsg)
+	return ok
+}
+
+// loadParticipant is guardParticipant for the caller that needs the message it let
+// through: the same lookup, the same friend gate, the same refusals, and the message on
+// success. Reading a picture is one (ServeImage).
+func (h *Handler) loadParticipant(w http.ResponseWriter, r *http.Request, id, authedID string, needsFriend bool, failMsg string) (*messageRecord, bool) {
 	cur, err := participantMessage(r.Context(), h.db, id, authedID)
 	if errors.Is(err, errNoMessage) {
 		httpx.WriteError(w, http.StatusNotFound, errMessageNotFound)
-		return false
+		return nil, false
 	}
 	if err != nil {
 		logx.Error("messaging: message lookup: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, failMsg)
-		return false
+		return nil, false
 	}
 	if !needsFriend {
-		return true
+		return cur, true
 	}
 	peerID := cur.SenderID
 	if peerID == authedID {
@@ -1613,9 +1665,9 @@ func (h *Handler) guardParticipant(w http.ResponseWriter, r *http.Request, id, a
 	}
 	if h.guardRecipient(r.Context(), authedID, peerID) != "" {
 		httpx.WriteError(w, http.StatusNotFound, errMessageNotFound)
-		return false
+		return nil, false
 	}
-	return true
+	return cur, true
 }
 
 // parseLimit clamps the history ?limit= query param.

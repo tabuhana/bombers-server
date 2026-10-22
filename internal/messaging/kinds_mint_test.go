@@ -140,7 +140,9 @@ func TestCheckKindPayload(t *testing.T) {
 		{"invite missing its name", kindInvite, `{"invite_id":"i","room":"r"}`, errBadPayload},
 		{"invite with a field of its own invention", kindInvite, `{"invite_id":"i","room":"r","room_name":"n","admin":true}`, errBadPayload},
 		{"invite with a second document after it", kindInvite, good + good, errBadPayload},
-		{"image, which nothing writes yet", kindImage, `{}`, errKindNotMintable},
+		{"image", kindImage, `{"width":1280,"height":720,"mime":"image/png","size":184320}`, nil},
+		{"image with nothing", kindImage, "", errBadPayload},
+		{"image with an empty object", kindImage, `{}`, errBadPayload},
 		{"a word nothing renders", "sticker", `{}`, errUnknownKind},
 		{"no kind at all", "", "", errUnknownKind},
 	}

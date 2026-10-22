@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tabuhana/bombers-server/internal/media"
 	"github.com/tabuhana/bombers-server/internal/messaging"
 	"github.com/tabuhana/bombers-server/internal/notify"
 	"github.com/tabuhana/bombers-server/internal/rooms"
@@ -67,5 +68,62 @@ func TestMainRegistersTheInviteRead(t *testing.T) {
 	}
 	if !strings.Contains(string(src), `r.Get("/invites/{inviteID}", roomsHandler.GetInvite)`) {
 		t.Error("GET /invites/{inviteID} is not registered to roomsHandler.GetInvite")
+	}
+}
+
+// messaging may not import media, so it declares the slice of the store it needs and
+// main hands the real one in. If media.Store ever stops satisfying it this stops
+// compiling, which is the cheap way for that to be found.
+var _ messaging.ObjectStore = media.Store(nil)
+
+// A messaging handler built with no store is valid Go that refuses every picture with
+// a 500 - quietly, since the text paths never touch it. So that main passes it is
+// checked as text, like the invite writer is.
+func TestMainHandsMessagingTheObjectStore(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	for _, line := range strings.Split(string(src), "\n") {
+		if strings.Contains(line, "messaging.NewHandler(") {
+			calls = append(calls, line)
+		}
+	}
+	if len(calls) != 1 || !strings.Contains(calls[0], "notifyHub.SendMany, storage)") {
+		t.Errorf("messaging.NewHandler is built as %q; it must be given the media store as `storage`", calls)
+	}
+}
+
+// The two picture routes, and the scope each sits under: sending as you is a write,
+// and reading a picture is the same read as reading the thread it is in. A token that
+// can only read must not be able to send, and one that can only send must not be able
+// to read the thread back.
+func TestMainRegistersThePictureRoutesUnderTheirScopes(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := ""
+	found := map[string]string{}
+	for _, line := range strings.Split(string(src), "\n") {
+		if i := strings.Index(line, "apitokens.RequireScope(apitokens."); i >= 0 {
+			rest := line[i+len("apitokens.RequireScope(apitokens."):]
+			scope = rest[:strings.Index(rest, ")")]
+		}
+		for _, route := range []string{
+			`r.Post("/messages/image", messagingHandler.SendImage)`,
+			`r.Get("/messages/{messageID}/image", messagingHandler.ServeImage)`,
+		} {
+			if strings.Contains(line, route) {
+				found[route] = scope
+			}
+		}
+	}
+	if got := found[`r.Post("/messages/image", messagingHandler.SendImage)`]; got != "MessagesWrite" {
+		t.Errorf("POST /messages/image is under scope %q, want MessagesWrite", got)
+	}
+	if got := found[`r.Get("/messages/{messageID}/image", messagingHandler.ServeImage)`]; got != "MessagesRead" {
+		t.Errorf("GET /messages/{messageID}/image is under scope %q, want MessagesRead", got)
 	}
 }

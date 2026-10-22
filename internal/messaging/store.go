@@ -148,6 +148,12 @@ func insertMessage(ctx context.Context, db dbExecutor, m *messageRecord) (*messa
 	if err := checkKindPayload(m.Kind, m.Payload); err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
 	}
+	// The words of a card or a picture are empty: what it says is its payload, and a
+	// sentence stored beside one would be text the server wrote on the sender's behalf,
+	// and search would index it as if they had typed it.
+	if m.Kind != kindText && m.Body != "" {
+		return nil, fmt.Errorf("insert message: %w: only text has a body", errBadPayload)
+	}
 	out, err := scanMessage(db.QueryRow(ctx, insertMessageSQL, m.ID, m.SenderID, m.RecipientID, m.Body, m.Nonce, m.ReplyToID, m.Kind, m.Payload))
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
@@ -1101,6 +1107,19 @@ func searchMessages(ctx context.Context, db dbExecutor, userID, query, with stri
 		return nil, fmt.Errorf("iterate results: %w", err)
 	}
 	return out, nil
+}
+
+// messageExistsSQL asks whether a message with this id is stored at all, deleted or
+// not. It is how SendImage tells a send that failed from one whose commit was lost on
+// the way back (see discardUnlessStored).
+const messageExistsSQL = `SELECT EXISTS (SELECT 1 FROM messages WHERE id = $1)`
+
+func messageExists(ctx context.Context, db dbExecutor, id string) (bool, error) {
+	var ok bool
+	if err := db.QueryRow(ctx, messageExistsSQL, id).Scan(&ok); err != nil {
+		return false, fmt.Errorf("check message exists: %w", err)
+	}
+	return ok, nil
 }
 
 // userExists guards SendMessage so a DM to a nonexistent recipient collapses to
