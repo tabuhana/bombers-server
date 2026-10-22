@@ -210,6 +210,7 @@ bombers-server/
 │   ├── noderecords/           a node's records + the responses to them
 │   ├── messaging/             DM persistence + delivery
 │   ├── rooms/                 ephemeral room lifecycle
+│   ├── transfers/             file offers (a nudge to one friend) + the ICE list
 │   ├── realtime/              WebSocket hub, presence, indicators
 │   └── store/                 Postgres access (sqlc/pgx), migrations
 ├── migrations/
@@ -237,7 +238,7 @@ These are settled — build to them, don't re-litigate:
 
 1. **Conflict mechanism:** exact divergence detection (per-item version vector? last-common-sync timestamp?). The active-note auto-pull exclusion keeps the common case safe, but the underlying divergence-detection mechanism still needs picking.
 2. **Games (server side):** deferred entirely. When picked up: how game bundles are stored/served, and whether the server relays opaque state, validates turns, or holds authority. Don't foreclose any of these now.
-3. **Rooms beyond messaging:** file viewing and shared editing are anticipated but unspecified — design each when picked up. **File sharing is decided and is not one of them:** sending a friend a file goes **client to client over WebRTC**, with the room used only to relay the offer/answer/ICE candidates. The bytes never touch this server, because bandwidth is metered per gigabyte and a relayed video is paid for twice. No new signalling domain — `rooms` already forwards opaque frames between friends, which is exactly what signalling is. Client-side design in the client repo's `docs/TRANSFER.md`.
+3. **Rooms beyond messaging:** file viewing and shared editing are anticipated but unspecified — design each when picked up. **File sharing is decided and is not one of them:** sending a friend a file goes **client to client over WebRTC**, with the room used only to relay the offer/answer/ICE candidates. The bytes never touch this server, because bandwidth is metered per gigabyte and a relayed video is paid for twice. No new signalling domain — `rooms` already forwards opaque frames between friends, which is exactly what signalling is. Two small things around it live in `transfers/`: `POST /transfers/offer` (tell one friend a file is coming and which room to join — a `transfer` nudge frame, stored nowhere, never a DM) and `GET /ice` (the STUN list both ends use, from server config, never a TURN entry). Client-side design in the client repo's `docs/TRANSFER.md`.
 4. **S3 / blob-storage phase (remaining slices):** profile media is done (see "Profile media"); still to design when picked up: photo libraries, DM image attachments, syncing note attachments across devices, and any room files — per-slice bucket layout, caps, and lifecycle.
 
 ## What to refuse / push back on (server-level)

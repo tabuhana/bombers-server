@@ -5,6 +5,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/messaging"
 	"github.com/tabuhana/bombers-server/internal/notify"
+	"github.com/tabuhana/bombers-server/internal/transfers"
 )
 
 // messaging may not import notify, so it names its own kinds and main hands it the
@@ -20,5 +21,13 @@ func TestMessagingPushesUnderTheKindsTheClientListensFor(t *testing.T) {
 		if k.messaging != k.notify {
 			t.Errorf("%s: messaging.Kind = %q, notify.Kind = %q", k.name, k.messaging, k.notify)
 		}
+	}
+}
+
+// transfers may not import notify either, and a mismatch is just as silent: every
+// file offer would go out under a kind no client listens for.
+func TestTransfersPushesUnderTheKindTheClientListensFor(t *testing.T) {
+	if transfers.KindTransfer != notify.KindTransfer {
+		t.Errorf("transfers.KindTransfer = %q, notify.KindTransfer = %q", transfers.KindTransfer, notify.KindTransfer)
 	}
 }
