@@ -332,3 +332,163 @@ func TestAnAcceptedInviteDiesWithTheRoom(t *testing.T) {
 		t.Fatalf("status = %d, want the opaque 404", rec.Code)
 	}
 }
+
+// kick sends the host's real kick control, so the dispatcher is part of the test.
+func kick(g *inviteRig, room *Room, target string) {
+	g.h.control(room, "host", &envelope{Type: CtlKick, Data: json.RawMessage(`{"user_id":"` + target + `"}`)}, &fakeConn{})
+}
+
+// lastState is the state in the newest invite frame `to` was sent, or "" for none.
+func lastState(g *inviteRig, to string) InviteState {
+	ns := g.nudges(to)
+	if len(ns) == 0 {
+		return ""
+	}
+	return ns[len(ns)-1].inv.State
+}
+
+// For a stranger to the host the accepted invite is the only way in, so a kick that
+// left it standing would remove them for a moment and let them walk straight back.
+func TestAKickVoidsAStrangersInviteSoTheyCannotWalkBackIn(t *testing.T) {
+	g, room, conns := memberInvitesRoom(t)
+	ctx := t.Context()
+	setMemberInvites(g, room, "host", `{"allow":true}`, conns["host"])
+	inv := samAccepts(g, room)
+	samConn := &fakeConn{}
+	if _, err := room.Join("sam", "name-sam", samConn); err != nil {
+		t.Fatal(err)
+	}
+
+	kick(g, room, "sam")
+
+	// Told as the kick returns, not when some later call happens along to flush.
+	if lastState(g, "sam") != InviteDeclined || lastState(g, "bob") != InviteDeclined {
+		t.Fatalf("inviter and invitee should both hear declined: sam=%q bob=%q", lastState(g, "sam"), lastState(g, "bob"))
+	}
+	if room.HasMember("sam") || !samConn.closed {
+		t.Fatal("setup: the kick should have removed and disconnected sam")
+	}
+	if g.h.allowed(ctx, room, "sam") {
+		t.Fatal("a kicked stranger got back in on the strength of their accepted invite")
+	}
+	if rec := getRoom(g.h, "room1", "sam"); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want the opaque 404", rec.Code)
+	}
+	// Declined, the existing final state: not expired (that would read 410), and it
+	// cannot be accepted again or asked past.
+	if rec := g.accept("sam", inv.ID); rec.Code != http.StatusConflict || errorCode(rec) != errInviteAnswered {
+		t.Fatalf("accepting a voided invite: status = %d, error = %q, want 409 %s", rec.Code, errorCode(rec), errInviteAnswered)
+	}
+	rec := g.invite("room1", "bob", "sam")
+	if rec.Code != http.StatusOK || decodeInvite(t, rec).State != InviteDeclined {
+		t.Fatalf("re-inviting a kicked stranger: status = %d, %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAKickLeavesTheirInvitesToOtherRoomsAlone(t *testing.T) {
+	g, room, conns := memberInvitesRoom(t)
+	ctx := t.Context()
+	other := g.room("room2", "host2", "bob")
+	g.befriend("host2", "bob")
+	otherHost := &fakeConn{}
+	setMemberInvites(g, room, "host", `{"allow":true}`, conns["host"])
+	setMemberInvites(g, other, "host2", `{"allow":true}`, otherHost)
+	samAccepts(g, room)
+	samAccepts(g, other)
+	if _, err := room.Join("sam", "name-sam", &fakeConn{}); err != nil {
+		t.Fatal(err)
+	}
+
+	kick(g, room, "sam")
+
+	if g.h.allowed(ctx, room, "sam") {
+		t.Fatal("setup: the kick should have voided the invite to its own room")
+	}
+	if !g.h.allowed(ctx, other, "sam") {
+		t.Fatal("a kick from one room voided the kicked person's invite to another")
+	}
+}
+
+func TestAKickLeavesOtherMembersInvitesToTheRoomAlone(t *testing.T) {
+	g, room, conns := memberInvitesRoom(t)
+	ctx := t.Context()
+	setMemberInvites(g, room, "host", `{"allow":true}`, conns["host"])
+	g.befriend("bob", "kim")
+	samAccepts(g, room)
+	kim := decodeInvite(t, g.invite("room1", "bob", "kim"))
+	g.accept("kim", kim.ID)
+	if _, err := room.Join("sam", "name-sam", &fakeConn{}); err != nil {
+		t.Fatal(err)
+	}
+
+	kick(g, room, "sam")
+
+	if !g.h.allowed(ctx, room, "kim") {
+		t.Fatal("kicking sam voided kim's invite to the same room")
+	}
+	if got := g.nudges("kim"); lastState(g, "kim") != InviteAccepted {
+		t.Fatalf("kim should not have been told anything new, got %+v", got)
+	}
+}
+
+// A friend of the host is admitted by the friendship, not the invite. Voiding their
+// invite on a kick must not turn a kick into a ban: that is a different feature.
+func TestAKickedFriendOfTheHostCanStillComeBackByFriendship(t *testing.T) {
+	g, room, _ := memberInvitesRoom(t)
+	ctx := t.Context()
+	g.befriend("host", "alice")
+	g.befriend("bob", "alice")
+	inv := decodeInvite(t, g.invite("room1", "bob", "alice"))
+	g.accept("alice", inv.ID)
+	if _, err := room.Join("alice", "name-alice", &fakeConn{}); err != nil {
+		t.Fatal(err)
+	}
+
+	kick(g, room, "alice")
+
+	if room.HasMember("alice") {
+		t.Fatal("setup: the kick should have removed alice")
+	}
+	if !g.h.allowed(ctx, room, "alice") {
+		t.Fatal("a kicked friend of the host must still be admitted by the friendship")
+	}
+	if rec := getRoom(g.h, "room1", "alice"); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestAKickVoidsAStillPendingInviteToo(t *testing.T) {
+	g, room, _ := memberInvitesRoom(t)
+	g.befriend("host", "alice")
+	g.befriend("bob", "alice")
+	inv := decodeInvite(t, g.invite("room1", "bob", "alice"))
+	if _, err := room.Join("alice", "name-alice", &fakeConn{}); err != nil {
+		t.Fatal(err)
+	}
+
+	kick(g, room, "alice")
+
+	if rec := g.accept("alice", inv.ID); rec.Code != http.StatusConflict {
+		t.Fatalf("accepting after a kick: status = %d, want 409", rec.Code)
+	}
+	if got := g.list("alice"); len(got) != 0 {
+		t.Fatalf("a voided invite is still listed as waiting: %+v", got)
+	}
+}
+
+func TestAKickWithNoInviteInPlayDoesNothingOdd(t *testing.T) {
+	g, room, _ := memberInvitesRoom(t)
+	before := len(g.sent)
+
+	kick(g, room, "bob")
+
+	if room.HasMember("bob") {
+		t.Fatal("setup: the kick should have removed bob")
+	}
+	if len(g.sent) != before {
+		t.Fatalf("a kick with no invite sent %d invite frame(s)", len(g.sent)-before)
+	}
+	if len(room.invites) != 0 {
+		t.Fatalf("a kick with no invite left %d invite(s) behind", len(room.invites))
+	}
+}

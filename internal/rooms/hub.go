@@ -185,6 +185,11 @@ type Room struct {
 	// only ever emptied by flushExpired, outside the lock (see there).
 	expired   []Invite
 	onExpired func(Invite)
+	// voided queues invites a kick turned to declined, with onVoided to tell the
+	// two people involved. Same discipline as expired: queued under mu, drained by
+	// flushExpired with no lock held.
+	voided   []Invite
+	onVoided func(Invite)
 }
 
 // MemberInfo is the wire-safe view of a member (presence lists, join/leave).
@@ -333,7 +338,17 @@ func (r *Room) SetActivity(byUserID, activityID string) error {
 //
 // The host cannot kick themselves — that's `end`, and quietly treating one as
 // the other would close a room somebody meant to stay in.
-func (r *Room) Kick(byUserID, targetID string) error {
+//
+// A kick also VOIDS the target's invite to this room (see voidInvitesForLocked).
+// For a stranger to the host that invite is the only thing that lets them in, so
+// a kick that left it standing would remove them for a moment and let them walk
+// straight back: a control that looks like it works. A FRIEND of the host is
+// admitted by the friendship, not by an invite, so for them a kick still removes
+// only for the moment. THAT ASYMMETRY IS DELIBERATE: a kick is not a ban, making
+// it one is a different feature nobody has asked for, and voiding the invite is
+// as far as this goes. Do not "fix" it.
+func (r *Room) Kick(byUserID, targetID string, now time.Time) error {
+	defer r.flushExpired()
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -358,6 +373,7 @@ func (r *Room) Kick(byUserID, targetID string) error {
 		target.conn.Send(frame)
 	}
 	r.removeLocked(targetID)
+	r.voidInvitesForLocked(targetID, now)
 	r.broadcastLocked(TypeLeave, map[string]any{"member": MemberInfo{UserID: targetID}}, "")
 	r.mu.Unlock()
 
@@ -551,6 +567,9 @@ type Hub struct {
 	// before any room exists (Create copies it into each room); nil means nobody is
 	// told, which is how a hub built on its own in a test behaves.
 	onExpired func(Invite)
+	// onVoided tells the inviter and invitee that a kick voided an invite. Set the
+	// same way.
+	onVoided func(Invite)
 }
 
 func NewHub() *Hub {
@@ -574,6 +593,7 @@ func (h *Hub) Create(id, name, hostID string, now time.Time) *Room {
 		emptySince: now, // nobody has connected yet; the reaper's grace covers it
 		idx:        h.invites,
 		onExpired:  h.onExpired,
+		onVoided:   h.onVoided,
 	}
 	h.rooms[id] = r
 	return r

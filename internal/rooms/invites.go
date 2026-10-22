@@ -136,10 +136,38 @@ func (r *Room) disposeInvitesLocked() {
 	}
 }
 
+// voidInvitesForLocked is a kick taking back the kicked person's way in: every
+// invite of theirs to THIS room that is still pending or accepted becomes
+// declined. Declined is final for the room's life, which is exactly the meaning
+// wanted - it admits nobody (HoldsInvite), cannot be accepted again (409), and
+// cannot be asked past (Invite hands the declined one back) - and it is a state
+// that already exists, so nothing new is invented. Only the target's invites to
+// this room are touched: other people's, and the target's invites to any other
+// room, are other rooms' and other people's business.
+//
+// Each change is queued for the inviter and the invitee, the way an answer is
+// announced; a kick with no invite in play queues nothing. Lapsed ones are settled
+// first, so an invite that had run out is reported as expired, not as declined.
+// Caller holds r.mu and must flush after releasing it.
+func (r *Room) voidInvitesForLocked(userID string, now time.Time) {
+	for _, inv := range r.invites {
+		if inv.To != userID {
+			continue
+		}
+		r.settleLocked(inv, now)
+		if inv.State == InvitePending || inv.State == InviteAccepted {
+			inv.State = InviteDeclined
+			r.voided = append(r.voided, r.copyLocked(inv))
+		}
+	}
+}
+
 // flushExpired hands the invites that expired since the last flush to the room's
-// sink, which tells each invitee. It takes r.mu only to swap the queue out and
-// calls the sink with NO lock held: the sink reaches the notify hub, and a push
-// made under r.mu would hold the room across code this package does not own.
+// sink, which tells each invitee, and does the same for invites a kick voided.
+// (One flush for both queues, so THE RULE below stays one rule.) It takes r.mu
+// only to swap the queues out and calls the sinks with NO lock held: a sink reaches
+// the notify hub, and a push made under r.mu would hold the room across code this
+// package does not own.
 //
 // THE RULE: every method that can settle an invite must run this AFTER it has
 // released r.mu - `defer r.flushExpired()` BEFORE the Lock, so the deferred
@@ -152,13 +180,20 @@ func (r *Room) flushExpired() {
 	queued := r.expired
 	r.expired = nil
 	sink := r.onExpired
+	voided := r.voided
+	r.voided = nil
+	voidSink := r.onVoided
 	r.mu.Unlock()
 
-	if sink == nil {
-		return
+	if sink != nil {
+		for _, inv := range queued {
+			sink(inv)
+		}
 	}
-	for _, inv := range queued {
-		sink(inv)
+	if voidSink != nil {
+		for _, inv := range voided {
+			voidSink(inv)
+		}
 	}
 }
 

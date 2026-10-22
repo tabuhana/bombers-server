@@ -70,6 +70,10 @@ func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer, nudge func(userIDs []st
 	// other invite frame uses. It reads h.nudge when it fires, so a nil nudge stays
 	// a quiet no-op.
 	h.hub.onExpired = func(inv Invite) { h.pushInvite(inv.To, inv) }
+	// A kick that voids an invite is told to both ends from one frame value, as an
+	// answer is: the inviter's accepted invite and the kicked person's other
+	// windows must not go on showing what is no longer true.
+	h.hub.onVoided = func(inv Invite) { h.pushInviteTo([]string{inv.From, inv.To}, inv) }
 	return h
 }
 
@@ -481,7 +485,7 @@ func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender)
 	case CtlGame:
 		err = room.SetActivity(userID, req.ActivityID)
 	case CtlKick:
-		err = room.Kick(userID, req.UserID)
+		err = room.Kick(userID, req.UserID, h.now())
 	case CtlInvites:
 		if req.Allow == nil {
 			sender.Send(mustControl(TypeError, map[string]any{"code": errInvalidBody}))

@@ -198,7 +198,7 @@ func TestKickRemovesTellsAndDisconnects(t *testing.T) {
 	_, _ = room.Join("guest", "g", guest)
 	_, _ = room.Join("other", "o", other)
 
-	if err := room.Kick("host", "guest"); err != nil {
+	if err := room.Kick("host", "guest", time.Now()); err != nil {
 		t.Fatalf("kick: %v", err)
 	}
 	if guest.count(TypeKicked) != 1 {
@@ -226,13 +226,13 @@ func TestKickRefusals(t *testing.T) {
 	_, _ = room.Join("host", "h", &fakeConn{})
 	_, _ = room.Join("guest", "g", &fakeConn{})
 
-	if err := room.Kick("guest", "host"); !errors.Is(err, ErrNotHost) {
+	if err := room.Kick("guest", "host", time.Now()); !errors.Is(err, ErrNotHost) {
 		t.Errorf("a guest must not kick, got %v", err)
 	}
-	if err := room.Kick("host", "host"); err == nil {
+	if err := room.Kick("host", "host", time.Now()); err == nil {
 		t.Error("the host must not be able to kick themselves - that's ending the room")
 	}
-	if err := room.Kick("host", "nobody"); err == nil {
+	if err := room.Kick("host", "nobody", time.Now()); err == nil {
 		t.Error("kicking someone who isn't here should fail")
 	}
 }
@@ -357,7 +357,7 @@ func TestClosedRoomRefusesJoinsAndControls(t *testing.T) {
 	if err := room.SetActivity("host", "chess"); !errors.Is(err, ErrRoomClosed) {
 		t.Errorf("a closed room should refuse a game change, got %v", err)
 	}
-	if err := room.Kick("host", "guest"); !errors.Is(err, ErrRoomClosed) {
+	if err := room.Kick("host", "guest", time.Now()); !errors.Is(err, ErrRoomClosed) {
 		t.Errorf("a closed room should refuse a kick, got %v", err)
 	}
 }
