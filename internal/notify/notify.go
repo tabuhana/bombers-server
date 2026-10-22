@@ -79,14 +79,6 @@ const (
 	// seen. Sent to that one friend, and only when the marker actually
 	// moved.
 	KindRead = "read"
-	// KindTransfer — a friend has a file for you and is waiting in a room to send
-	// it (POST /transfers/offer). `d` carries {"from": "<sender id>", "room":
-	// "<room id>", "name": "<filename>", "size": <bytes>}. Sent to that one friend
-	// only, stores nothing, and is meant to be allowed to go missing: both ends have
-	// to be live for the transfer to happen at all, so an offer nobody was there to
-	// hear is not something to queue. The sender learns that from its own room timing
-	// out, never from this package.
-	KindTransfer = "transfer"
 )
 
 // sendQueue bounds one connection's backlog. These are tiny and infrequent, so

@@ -428,9 +428,8 @@ func buildAndServe() (*app, error) {
 	// (see the notify package for why this kind alone does), so messaging is
 	// handed the hub's fan-out as it is.
 	messagingHandler := messaging.NewHandler(pool, notifyHub.SendMany)
-	// A file offer is a nudge to one friend and nothing else: transfers is handed
-	// the hub's fan-out like messaging is, and learns nothing about sockets.
-	transfersHandler, err := transfers.NewHandler(pool, notifyHub.SendMany, cfg.ICEStunURLs)
+	// The STUN list a peer-to-peer transfer connects with (GET /ice).
+	transfersHandler, err := transfers.NewHandler(cfg.ICEStunURLs)
 	if err != nil {
 		// A bad ICE list is an operator mistake, and serving a list that cannot work
 		// (or a TURN one) to every client is worse than not starting. The DB is
@@ -547,9 +546,6 @@ func buildAndServe() (*app, error) {
 			// friend something, so a token that can only read may not send them.
 			r.Post("/messages/{userID}/read", messagingHandler.MarkRead)
 			r.Post("/messages/{userID}/typing", messagingHandler.Typing)
-			// Offering a friend a file is the same kind of act — you putting
-			// something in front of them — so it takes the same scope.
-			r.Post("/transfers/offer", transfersHandler.Offer)
 		})
 		// Token scope: reading DMs.
 		r.Group(func(r chi.Router) {

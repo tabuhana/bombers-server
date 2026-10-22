@@ -1,3 +1,7 @@
+// Package transfers helps two clients send each other a file directly. The bytes
+// never touch this server: the clients open a WebRTC data channel between
+// themselves, over a room, and the one thing they need from here is the list of
+// ICE servers to find a route with.
 package transfers
 
 import (
@@ -10,6 +14,23 @@ import (
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/httpx"
 )
+
+// Handler serves the ICE list.
+type Handler struct {
+	ice []string
+}
+
+// NewHandler builds the handler. stunCSV is the operator's ICE_STUN_URLS (empty
+// means DefaultSTUN); it is checked here, and an entry that is not a stun: or
+// stuns: URL — a TURN server above all — is an error rather than something
+// served to every client.
+func NewHandler(stunCSV string) (*Handler, error) {
+	stun, err := ParseSTUN(stunCSV)
+	if err != nil {
+		return nil, err
+	}
+	return &Handler{ice: stun}, nil
+}
 
 // DefaultSTUN is what GET /ice answers with when the operator has configured
 // nothing: the same public STUN servers the client carried before the server
