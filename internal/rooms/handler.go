@@ -48,10 +48,25 @@ type Handler struct {
 	pool   *pgxpool.Pool
 	issuer *auth.Issuer
 	hub    *Hub
+
+	// nudge delivers a frame to the listed users. Injected from main as the notify
+	// hub's fan-out so rooms never imports notify (the same seam messaging uses);
+	// nil means nobody is listening, which is how tests build a handler.
+	nudge func(userIDs []string, kind string, data any)
+
+	// The two questions this package asks the database, and the clock. Fields so a
+	// test can answer them without Postgres or a real hour; NewHandler wires the
+	// real ones.
+	friends  func(ctx context.Context, a, b string) (bool, error)
+	username func(ctx context.Context, userID string) string
+	now      func() time.Time
 }
 
-func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer) *Handler {
-	return &Handler{pool: pool, issuer: issuer, hub: NewHub()}
+func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer, nudge func(userIDs []string, kind string, data any)) *Handler {
+	h := &Handler{pool: pool, issuer: issuer, hub: NewHub(), nudge: nudge, now: time.Now}
+	h.friends = func(ctx context.Context, a, b string) (bool, error) { return areFriends(ctx, h.pool, a, b) }
+	h.username = func(ctx context.Context, userID string) string { return usernameFor(ctx, h.pool, userID) }
+	return h
 }
 
 // memberIdentity is who the socket belongs to, resolved once at join.
@@ -75,7 +90,7 @@ func (h *Handler) authFromToken(ctx context.Context, token string) (memberIdenti
 	if userID == "" {
 		return memberIdentity{}, errors.New("token has no user")
 	}
-	return memberIdentity{UserID: userID, Username: usernameFor(ctx, h.pool, userID)}, nil
+	return memberIdentity{UserID: userID, Username: h.username(ctx, userID)}, nil
 }
 
 // StartReaper runs the empty-room sweep until ctx is cancelled. main owns the
@@ -154,8 +169,9 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Get answers whether a room is still open, for an invite deciding between a
-// Join button and "Room closed". It asks nothing a join wouldn't: the same gate,
+// Get answers whether a room is still open. (It once let a DM invite choose between
+// a Join button and "Room closed"; an invite now carries its own state.) It asks
+// nothing a join wouldn't: the same gate,
 // and every refusal — no such room, an ended one, not the host's friend — is the
 // same 404, so an id still can't be probed. Closed is final; a room never reopens.
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +199,7 @@ func (h *Handler) allowed(ctx context.Context, room *Room, userID string) bool {
 	if room.HostID == userID {
 		return true
 	}
-	friends, err := areFriends(ctx, h.pool, room.HostID, userID)
+	friends, err := h.friends(ctx, room.HostID, userID)
 	if err != nil {
 		logx.Error("rooms: friendship check: %v", err)
 		return false

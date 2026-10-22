@@ -9,13 +9,15 @@
 // list slightly wrong, and stays true to the product rule that the server is a
 // published copy plus a nudge — not a live mirror.
 //
-// The one exception is `dm`, which carries the message. The rule is right for
-// `profile`, `friend` and `record`, which fan out to many people and could leak
-// by getting a list wrong. It is wrong for a direct message, which is addressed
-// to exactly the two people in the conversation — the ids come from the message
-// row itself, so there is no broadcast list to get wrong — and a chat that makes
-// you fetch after every doorbell is not a chat. messaging builds the frame and
-// decides who gets it; this package still only delivers what it is handed.
+// The exceptions are `dm`, which carries the message, and `invite`, which carries the
+// invite. The rule is right for `profile`, `friend` and `record`, which fan out to
+// many people and could leak by getting a list wrong. It is wrong for a direct
+// message, which is addressed to exactly the two people in the conversation — the
+// ids come from the message row itself, so there is no broadcast list to get wrong —
+// and a chat that makes you fetch after every doorbell is not a chat. messaging
+// builds the frame and decides who gets it; this package still only delivers what it
+// is handed. An invite is the same shape of exception: it goes to the one person
+// asked, or to the one who asked, and rooms builds it from the invite itself.
 //
 // It is separate from `rooms`, which is also WebSockets, because the two have
 // nothing in common but the transport. A room socket is scoped to a room, dies
@@ -79,6 +81,16 @@ const (
 	// seen. Sent to that one friend, and only when the marker actually
 	// moved.
 	KindRead = "read"
+	// KindInvite — someone asked you to a room, or answered an invite you sent
+	// (internal/rooms). `d` carries the whole invite, {"id", "room", "room_name",
+	// "from", "from_name", "to", "to_name", "state", "expires_at"}, and its `state`
+	// says which change this is: "pending" to the invitee when it is made,
+	// "accepted" or "declined" to the inviter when answered. One kind for every
+	// change, like KindDM. It carries content because it is addressed to exactly the
+	// two people it concerns, whose ids come from the invite itself — and it is
+	// STILL only a nudge: the server holds the invite and GET /invites lists it, so
+	// a frame that lands on no socket loses nothing.
+	KindInvite = "invite"
 )
 
 // sendQueue bounds one connection's backlog. These are tiny and infrequent, so

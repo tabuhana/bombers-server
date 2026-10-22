@@ -5,6 +5,7 @@ import (
 
 	"github.com/tabuhana/bombers-server/internal/messaging"
 	"github.com/tabuhana/bombers-server/internal/notify"
+	"github.com/tabuhana/bombers-server/internal/rooms"
 )
 
 // messaging may not import notify, so it names its own kinds and main hands it the
@@ -20,5 +21,14 @@ func TestMessagingPushesUnderTheKindsTheClientListensFor(t *testing.T) {
 		if k.messaging != k.notify {
 			t.Errorf("%s: messaging.Kind = %q, notify.Kind = %q", k.name, k.messaging, k.notify)
 		}
+	}
+}
+
+// rooms may not import notify either, so it names the invite kind itself. A drift
+// here delivers every invite and every answer under a kind no client listens for,
+// and a push never errors to say so.
+func TestRoomsPushesInvitesUnderTheKindTheClientListensFor(t *testing.T) {
+	if rooms.KindInvite != notify.KindInvite {
+		t.Errorf("rooms.KindInvite = %q, notify.KindInvite = %q", rooms.KindInvite, notify.KindInvite)
 	}
 }

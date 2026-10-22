@@ -450,7 +450,7 @@ func buildAndServe() (*app, error) {
 		notifyHub.SendMany(userIDs, notify.KindRecord, map[string]string{"node": nodeID, "from": fromID})
 	})
 	mediaHandler := media.NewHandler(pool, storage, profileNudge)
-	roomsHandler := rooms.NewHandler(pool, issuer)
+	roomsHandler := rooms.NewHandler(pool, issuer, notifyHub.SendMany)
 	activitiesHandler := activities.NewHandler(pool, storage)
 	packsHandler := packs.NewHandler(pool, storage)
 	releasesHandler := releases.NewHandler(pool, storage)
@@ -633,9 +633,17 @@ func buildAndServe() (*app, error) {
 		// Creating a room is ordinary authed HTTP; the creator becomes its host
 		// (the referee). Rooms are in-memory and ephemeral - nothing persists.
 		r.Post("/rooms", roomsHandler.Create)
-		// Is a room still open? A DM invite asks before offering Join. Same gate
-		// as the join itself, and the same opaque 404 for every refusal.
+		// Is a room still open? Same gate as the join itself, and the same opaque
+		// 404 for every refusal.
 		r.Get("/rooms/{roomID}", roomsHandler.Get)
+		// Room invites: held by the server, owned by the room, gone with it. Asking
+		// a friend, what is waiting for me (the truth - the `invite` nudge is only a
+		// nudge), and the two answers. Accepting joins nothing; it returns the room id
+		// and the client opens the socket through the same join gate as ever.
+		r.Post("/rooms/{roomID}/invites", roomsHandler.CreateInvite)
+		r.Get("/invites", roomsHandler.ListInvites)
+		r.Post("/invites/{inviteID}/accept", roomsHandler.AcceptInvite)
+		r.Post("/invites/{inviteID}/decline", roomsHandler.DeclineInvite)
 		// The activity (game) store: browse, install, and fetch a game's assets.
 		// Admin-only game curation — the console's publish-game/unpublish-game
 		// reached over HTTP, so an operator can publish from the client instead

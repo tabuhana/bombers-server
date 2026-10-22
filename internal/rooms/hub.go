@@ -164,6 +164,12 @@ type Room struct {
 	// here. A blip must not end the room, so this starts a countdown the reaper
 	// finishes rather than closing on the spot.
 	hostAway time.Time
+	// invites are the invitations TO this room, owned here and gone with it (see
+	// invites.go). idx is the hub's locator for "what is waiting for this user";
+	// it is shared and has its own lock, which may be taken while holding mu;
+	// mu is never taken while holding it.
+	invites map[string]*Invite
+	idx     *inviteIndex
 }
 
 // MemberInfo is the wire-safe view of a member (presence lists, join/leave).
@@ -315,6 +321,8 @@ func (r *Room) Close() {
 		return
 	}
 	r.closed = true
+	// A pending invite to a room that has ended must never read as pending.
+	r.disposeInvitesLocked()
 	r.broadcastLocked(TypeClosed, map[string]any{"room": r.ID}, "")
 	conns := make([]Sender, 0, len(r.members))
 	for _, m := range r.members {
@@ -477,10 +485,14 @@ func (r *Room) broadcastLocked(msgType string, data map[string]any, exceptUserID
 type Hub struct {
 	mu    sync.Mutex
 	rooms map[string]*Room
+	// invites locates the invites waiting on each user. A separate structure with
+	// its own lock, deliberately: GET /invites must not queue behind the hub lock
+	// that every room create, lookup and reap takes.
+	invites *inviteIndex
 }
 
 func NewHub() *Hub {
-	return &Hub{rooms: map[string]*Room{}}
+	return &Hub{rooms: map[string]*Room{}, invites: newInviteIndex()}
 }
 
 // Create registers a new room hosted by `hostID`. The host doesn't join until
@@ -498,6 +510,7 @@ func (h *Hub) Create(id, name, hostID string, now time.Time) *Room {
 		name:       name,
 		members:    map[string]*Member{},
 		emptySince: now, // nobody has connected yet; the reaper's grace covers it
+		idx:        h.invites,
 	}
 	h.rooms[id] = r
 	return r
@@ -557,6 +570,9 @@ func (h *Hub) Reap(now time.Time, grace time.Duration) int {
 	for _, r := range ending {
 		r.Close()
 	}
+	// Invites that have run out their hour stop being findable. Done here because
+	// this is the one sweep the hub already has.
+	h.invites.prune(now)
 	return len(ending)
 }
 
