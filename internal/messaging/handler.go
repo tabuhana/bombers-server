@@ -1677,18 +1677,25 @@ func parseLimit(raw string) int {
 
 // clampLimit clamps a ?limit= query param into [1, max], falling back to def for
 // missing or unparseable values.
+//
+// It parses into a fixed 64 bits rather than into an int, so the answer does not
+// depend on how wide an int happens to be. With Atoi, a number too big for the
+// platform's int was an ERROR and fell back to def, which meant "99999999999"
+// got the default limit on a 32-bit build and the max on a 64-bit one — the same
+// request answered two ways by the same code. A number past the max is just a
+// number past the max, however large, and clamps.
 func clampLimit(raw string, def, max int) int {
 	if raw == "" {
 		return def
 	}
-	n, err := strconv.Atoi(raw)
+	n, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || n <= 0 {
 		return def
 	}
-	if n > max {
+	if n > int64(max) {
 		return max
 	}
-	return n
+	return int(n)
 }
 
 // parseSince reads the catch-up cursor. Missing, negative or unparseable all mean

@@ -240,7 +240,8 @@ func TestClampLimit(t *testing.T) {
 		{"350", 200, 500, 350, "in range"},
 		{"500", 200, 500, 500, "at the max"},
 		{"501", 200, 500, 500, "past the max"},
-		{"99999999999", 200, 500, 200, "overflow is unparseable"},
+		{"99999999999", 200, 500, 500, "far past the max is still past the max"},
+		{"99999999999999999999999", 200, 500, 200, "past int64 is unparseable"},
 	}
 	for _, tc := range cases {
 		if got := clampLimit(tc.raw, tc.def, tc.max); got != tc.want {
