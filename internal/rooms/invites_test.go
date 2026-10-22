@@ -569,15 +569,15 @@ func TestRoomRemembersAtMostSoManyInvites(t *testing.T) {
 	g := newInviteRig(t)
 	room := g.room("room1", "host")
 	for i := 0; i < maxInvitesPerRoom; i++ {
-		if _, _, err := room.Invite("host", "u"+string(rune('A'+i/26))+string(rune('a'+i%26)), "", g.clock); err != nil {
+		if _, _, err := room.Invite("host", "u"+string(rune('A'+i/26))+string(rune('a'+i%26)), "", g.clock, false); err != nil {
 			t.Fatalf("invite %d: %v", i, err)
 		}
 	}
-	if _, _, err := room.Invite("host", "one-too-many", "", g.clock); err != ErrTooManyInvites {
+	if _, _, err := room.Invite("host", "one-too-many", "", g.clock, false); err != ErrTooManyInvites {
 		t.Fatalf("err = %v", err)
 	}
 	// Once they lapse there is room again.
-	if _, _, err := room.Invite("host", "one-too-many", "", g.clock.Add(2*InviteTTL)); err != nil {
+	if _, _, err := room.Invite("host", "one-too-many", "", g.clock.Add(2*InviteTTL), false); err != nil {
 		t.Fatalf("after the hour: %v", err)
 	}
 }

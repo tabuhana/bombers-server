@@ -25,7 +25,7 @@ const (
 	TypeWelcome = "room:welcome" // sent to the joiner: who's here, who hosts, what this room is
 	TypeJoin    = "room:join"    // broadcast: someone arrived
 	TypeLeave   = "room:leave"   // broadcast: someone left
-	TypeUpdate  = "room:update"  // broadcast: the name or the chosen game changed
+	TypeUpdate  = "room:update"  // broadcast: the name, the chosen game or member_invites changed
 	TypeKicked  = "room:kicked"  // sent to one member: the host removed you
 	TypeClosed  = "room:closed"  // broadcast: the room has ended, for everyone
 	TypeError   = "room:error"   // sent to one member: something was refused
@@ -45,6 +45,10 @@ const (
 	CtlKick   = "host:kick"   // {user_id}     — remove a member
 	CtlGame   = "host:game"   // {activity_id} — point the room at a game
 	CtlEnd    = "host:end"    // {}            — close the room for everyone
+	// CtlInvites decides who may be invited here: {allow: true} lets any member
+	// invite their own friends, strangers to the host included; {allow: false}
+	// (the default) keeps invites to people the room would admit anyway.
+	CtlInvites = "host:invites" // {allow}       — let members invite their own friends
 )
 
 // CtlPrefix marks a client→server control request. Frames carrying it are
@@ -152,8 +156,14 @@ type Room struct {
 	// one. The server holds the ID and nothing else — it still has no idea what
 	// any game DOES.
 	activityID string
-	closed     bool
-	members    map[string]*Member
+	// memberInvites is the host's switch for who may be invited: off (the zero
+	// value, and the default) means a member may invite only someone the room
+	// would admit without an invite; on means any member may invite their own
+	// friends. Turning it off stops NEW invites and nothing else - it evicts
+	// nobody and does not void an invite already accepted (kick does that job).
+	memberInvites bool
+	closed        bool
+	members       map[string]*Member
 	// order preserves arrival order, so the roster reads the way the room
 	// filled rather than however the map iterates.
 	order []string
@@ -229,6 +239,44 @@ func (r *Room) Closed() bool {
 	return r.closed
 }
 
+// MemberInvites reports whether members may currently invite their own friends.
+func (r *Room) MemberInvites() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.memberInvites
+}
+
+// updateLocked tells everyone the room's current descriptive state. It is the one
+// builder of `room:update`, so a rename, a game change and the invites switch all
+// carry the same keys: a client replaces what it knows with the frame and never
+// has to guess which field a particular update left out. Caller holds the lock.
+func (r *Room) updateLocked() {
+	r.broadcastLocked(TypeUpdate, map[string]any{
+		"name":           r.name,
+		"activity_id":    r.activityID,
+		"member_invites": r.memberInvites,
+	}, "")
+}
+
+// SetMemberInvites switches whether any member may invite their own friends, and
+// tells everyone over the ordinary `room:update`. Host only.
+//
+// Switching it OFF evicts nobody and does not touch an invite already accepted: it
+// only stops new invites being made. Removing a person is what Kick is for.
+func (r *Room) SetMemberInvites(byUserID string, allow bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrRoomClosed
+	}
+	if byUserID != r.HostID {
+		return ErrNotHost
+	}
+	r.memberInvites = allow
+	r.updateLocked()
+	return nil
+}
+
 // SetName retitles the room and tells everyone. Host only.
 //
 // An empty or over-long name is silently trimmed to something sane rather than
@@ -252,7 +300,7 @@ func (r *Room) SetName(byUserID, name string) error {
 		return ErrNotHost
 	}
 	r.name = name
-	r.broadcastLocked(TypeUpdate, map[string]any{"name": r.name, "activity_id": r.activityID}, "")
+	r.updateLocked()
 	return nil
 }
 
@@ -276,7 +324,7 @@ func (r *Room) SetActivity(byUserID, activityID string) error {
 		return ErrNotHost
 	}
 	r.activityID = activityID
-	r.broadcastLocked(TypeUpdate, map[string]any{"name": r.name, "activity_id": r.activityID}, "")
+	r.updateLocked()
 	return nil
 }
 

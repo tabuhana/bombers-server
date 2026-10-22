@@ -196,10 +196,36 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// allowed is the one rule for reaching a room, shared by joining and asking
-// after one: you are its host, or an accepted friend of the host — the same rule
-// as every other cross-user surface. A failed check counts as no.
+// allowed is THE rule for reaching a room, shared by joining and asking after one,
+// and the only place that decides it. You may reach a room if you are
+//
+//   - its host, or
+//   - an accepted friend of the host (the rule every cross-user surface uses), or
+//   - the holder of an ACCEPTED, unexpired invite to THIS room.
+//
+// The third is the security-relevant one. An invite is a narrow credential: it
+// names one room, it lasts an hour, it dies with the room, the host opted in (an
+// invite to a stranger exists only because the member-invites switch was on) and a
+// member vouched for the holder. A pending, declined or expired invite admits
+// nobody, and neither does an accepted invite to a different room (each room
+// checks only its own). Switching member invites off later does not void an
+// accepted invite.
+//
+// The invite is looked at first because it is in memory and the friendship is a
+// database query; a failed friendship check must not shut out someone holding a
+// valid invite. A failed check counts as no.
 func (h *Handler) allowed(ctx context.Context, room *Room, userID string) bool {
+	if room.HoldsInvite(userID, h.now()) {
+		return true
+	}
+	return h.hostRelation(ctx, room, userID)
+}
+
+// hostRelation is the host's own side of the gate: the host, or an accepted friend
+// of the host. It is a part of `allowed`, not a second gate - mayInvite asks it
+// directly because, with member invites off, who may be INVITED is exactly who
+// needs no invite to get in.
+func (h *Handler) hostRelation(ctx context.Context, room *Room, userID string) bool {
 	if room.HostID == userID {
 		return true
 	}
@@ -299,18 +325,7 @@ func (h *Handler) runMember(ctx context.Context, conn *websocket.Conn, room *Roo
 		}
 	}()
 
-	// Welcome: everything a joiner needs to render the room immediately - what
-	// it's called, who's here, who hosts, and which game it's pointed at. A late
-	// joiner asks the host for game STATE itself; the server has none to give.
-	welcome, err := encodeControl(TypeWelcome, map[string]any{
-		"room":        room.ID,
-		"name":        room.Name(),
-		"activity_id": room.Activity(),
-		"you":         claims.UserID,
-		"host":        room.Host(),
-		"members":     room.Members(),
-	})
-	if err == nil {
+	if welcome, err := welcomeFrame(room, claims.UserID); err == nil {
 		sender.Send(welcome)
 	}
 
@@ -410,12 +425,32 @@ func (h *Handler) runMember(ctx context.Context, conn *websocket.Conn, room *Roo
 	}
 }
 
+// welcomeFrame is everything a joiner needs to render the room immediately - what
+// it's called, who's here, who hosts, which game it's pointed at, and whether
+// members may invite their own friends (`member_invites`, so a joiner need not wait
+// for a room:update to know). A late joiner asks the host for game STATE itself;
+// the server has none to give.
+func welcomeFrame(room *Room, you string) ([]byte, error) {
+	return encodeControl(TypeWelcome, map[string]any{
+		"room":           room.ID,
+		"name":           room.Name(),
+		"activity_id":    room.Activity(),
+		"you":            you,
+		"host":           room.Host(),
+		"members":        room.Members(),
+		"member_invites": room.MemberInvites(),
+	})
+}
+
 // controlRequest is the payload of every `host:` frame - a small union, because
-// four one-field requests do not deserve four types.
+// five one-field requests do not deserve five types.
 type controlRequest struct {
 	Name       string `json:"name"`
 	UserID     string `json:"user_id"`
 	ActivityID string `json:"activity_id"`
+	// Allow is a pointer so a body that leaves it out is told apart from one that
+	// says false: a malformed `host:invites` must be refused, not read as "off".
+	Allow *bool `json:"allow"`
 }
 
 // control answers one host request.
@@ -447,6 +482,12 @@ func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender)
 		err = room.SetActivity(userID, req.ActivityID)
 	case CtlKick:
 		err = room.Kick(userID, req.UserID)
+	case CtlInvites:
+		if req.Allow == nil {
+			sender.Send(mustControl(TypeError, map[string]any{"code": errInvalidBody}))
+			return
+		}
+		err = room.SetMemberInvites(userID, *req.Allow)
 	case CtlEnd:
 		// The one control that answers by ending the conversation. Host only,
 		// same as the rest.

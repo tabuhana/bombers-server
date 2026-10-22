@@ -58,6 +58,9 @@ var (
 	ErrInviteExpired  = errors.New("invite expired")
 	ErrInviteAnswered = errors.New("invite already answered")
 	ErrTooManyInvites = errors.New("too many invites")
+	// ErrInvitesOff is the host having switched member invites off between the
+	// handler authorising an invite on that switch and the room lock being taken.
+	ErrInvitesOff = errors.New("member invites are off")
 )
 
 // Invite is an invitation as the wire describes it, and also what a room stores.
@@ -181,13 +184,22 @@ func (r *Room) lapse(inviteID string, now time.Time) {
 //
 // The friendship rules are the caller's (they need the database); this owns who
 // may ask and what an invite is.
-func (r *Room) Invite(byUserID, inviteeID, inviteeName string, now time.Time) (inv Invite, created bool, err error) {
+//
+// `needsSwitch` is the caller saying "I authorised this on the host's member-invites
+// switch being on" - the invitee is not someone the room admits by the host's own
+// relationships. The caller read the switch before a database round trip, so it is
+// re-read here under the lock: a host who turned it off in between must not have an
+// invite created after the fact. ErrInvitesOff is the answer.
+func (r *Room) Invite(byUserID, inviteeID, inviteeName string, now time.Time, needsSwitch bool) (inv Invite, created bool, err error) {
 	defer r.flushExpired()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.closed {
 		return Invite{}, false, ErrRoomClosed
+	}
+	if needsSwitch && !r.memberInvites {
+		return Invite{}, false, ErrInvitesOff
 	}
 	by, ok := r.members[byUserID]
 	if !ok {
@@ -237,15 +249,52 @@ func (r *Room) Invite(byUserID, inviteeID, inviteeName string, now time.Time) (i
 	return r.viewLocked(made, now), true, nil
 }
 
-// forgetSpentInvitesLocked drops what no longer says anything: accepted and
-// lapsed invites. Declined ones stay - that is the finality. Caller holds r.mu.
+// forgetSpentInvitesLocked drops what no longer says anything: lapsed invites, and
+// accepted ones whose hour has run out. Declined ones stay - that is the finality.
+//
+// An accepted invite WITHIN its hour is not spent: it is the holder's way back
+// into the room (see HoldsInvite), so forgetting it to make space would quietly
+// lock out someone the host let in. Caller holds r.mu.
 func (r *Room) forgetSpentInvitesLocked(now time.Time) {
 	for id, inv := range r.invites {
 		r.settleLocked(inv, now)
-		if inv.State == InviteAccepted || inv.State == InviteExpired {
+		if inv.State == InviteExpired || (inv.State == InviteAccepted && !now.Before(inv.ExpiresAt)) {
 			delete(r.invites, id)
 		}
 	}
+}
+
+// HoldsInvite reports whether `userID` holds an ACCEPTED invite to this room that
+// is still good: the room is open and the invite's hour has not run out. It is the
+// invite half of the join gate (Handler.allowed) and nothing else asks it.
+//
+// Only accepted counts. A pending invite is an offer, not a credential - accepting
+// it is what makes it one - and a declined or expired one admits nobody.
+//
+// The invite's own clock is read here, under the lock, against `now`: an accepted
+// invite never changes state when its hour passes (settleLocked only moves pending
+// ones), so the time check cannot be left to whatever last read the invite. Each
+// of the person's invites is settled on the way, and the news flushed after the
+// lock is released, like every other method that can settle one.
+func (r *Room) HoldsInvite(userID string, now time.Time) bool {
+	defer r.flushExpired()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return false
+	}
+	held := false
+	for _, inv := range r.invites {
+		if inv.To != userID {
+			continue
+		}
+		r.settleLocked(inv, now)
+		if inv.State == InviteAccepted && now.Before(inv.ExpiresAt) {
+			held = true
+		}
+	}
+	return held
 }
 
 // AnswerInvite records the invitee's answer. It refuses anything that is not a

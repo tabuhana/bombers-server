@@ -51,29 +51,39 @@ func (h *Handler) pushInviteTo(userIDs []string, inv Invite) {
 
 // mayInvite is the gate on asking someone to a room, run before the room is
 // touched. The inviter and invitee must be accepted friends - the rule every
-// cross-user surface uses - AND the invitee must be someone the room would let
-// in: the host, or the host's friend (`allowed`, the join gate itself).
+// cross-user surface uses - AND the room must be willing to take that invitee:
 //
-// The second half is the join gate's, not new policy. Without it a member could
-// invite their own friend who is a stranger to the host, the invitee would accept,
-// and the room socket would answer 404: an invitation that can only fail. Widening
-// the join gate to fix that would be a security change this feature has no
-// business making, so the invite refuses up front instead.
+//   - the host's member-invites switch is OFF (the default): the invitee must be
+//     someone the room admits on the host's own relationships - the host, or a
+//     friend of the host (`hostRelation`). Without that a member could invite
+//     their own friend who is a stranger to the host, and the invite could only
+//     ever fail. This is deliberately NOT `allowed`: an accepted invite is also a
+//     way in, and counting it here would let a member re-invite a stranger a
+//     previous accepted invite let in, extending their stay past the hour with the
+//     switch off. Off means off.
+//   - the switch is ON: any member's friend will do, strangers to the host
+//     included. The join gate admits them on the strength of the invite itself.
+//
+// `needsSwitch` reports that the answer rested on the switch being on, so the room
+// can re-check it under its lock (see Room.Invite).
 //
 // A failed check counts as no, like `allowed`.
-func (h *Handler) mayInvite(ctx context.Context, room *Room, byID, inviteeID string) bool {
+func (h *Handler) mayInvite(ctx context.Context, room *Room, byID, inviteeID string) (ok, needsSwitch bool) {
 	friends, err := h.friends(ctx, byID, inviteeID)
 	if err != nil {
 		logx.Error("rooms: friendship check: %v", err)
-		return false
+		return false, false
 	}
 	if !friends {
-		return false
+		return false, false
 	}
 	if byID == room.HostID || inviteeID == room.HostID {
-		return true // the friendship just checked IS the host relationship
+		return true, false // the friendship just checked IS the host relationship
 	}
-	return h.allowed(ctx, room, inviteeID)
+	if room.MemberInvites() {
+		return true, true
+	}
+	return h.hostRelation(ctx, room, inviteeID), false
 }
 
 // CreateInvite is POST /rooms/{roomID}/invites {"user_id"}: ask a friend to the
@@ -101,20 +111,25 @@ func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
 	room, err := h.hub.Get(chi.URLParam(r, "roomID"))
 	// Membership and self are checked before any query: they cost nothing and
 	// settle most refusals without touching the database.
-	if err != nil || req.UserID == authedID || !room.HasMember(authedID) ||
-		!h.mayInvite(r.Context(), room, authedID, req.UserID) {
+	if err != nil || req.UserID == authedID || !room.HasMember(authedID) {
+		httpx.WriteError(w, http.StatusNotFound, errRoomNotFound)
+		return
+	}
+	mayInvite, needsSwitch := h.mayInvite(r.Context(), room, authedID, req.UserID)
+	if !mayInvite {
 		httpx.WriteError(w, http.StatusNotFound, errRoomNotFound)
 		return
 	}
 
-	inv, created, err := room.Invite(authedID, req.UserID, h.username(r.Context(), req.UserID), h.now())
+	inv, created, err := room.Invite(authedID, req.UserID, h.username(r.Context(), req.UserID), h.now(), needsSwitch)
 	switch {
 	case errors.Is(err, ErrTooManyInvites):
 		httpx.WriteError(w, http.StatusBadRequest, errTooManyInvites)
 		return
 	case err != nil:
-		// The room ended, or the inviter left, between the checks above and the
-		// lock. Same answer as if it had happened a moment earlier.
+		// The room ended, the inviter left, or the host switched member invites off,
+		// between the checks above and the lock. Same answer as if it had happened a
+		// moment earlier.
 		httpx.WriteError(w, http.StatusNotFound, errRoomNotFound)
 		return
 	}
