@@ -289,6 +289,35 @@ func TestSendImageAcceptsEachFormat(t *testing.T) {
 	}
 }
 
+// A phone stores a portrait photo turned on its side and says so in EXIF; the browser
+// draws it upright, and the payload is what the thread reserves the picture's box from,
+// so it has to carry the drawn shape or the bubble changes shape when the picture lands.
+func TestSendImageStoresTheShapeTheBrowserDraws(t *testing.T) {
+	upright := testJPEG(t, 31, 21) // as the sensor saw it: wider than tall
+	// An APP1 right after the start of image: "Exif", then a big-endian TIFF whose one
+	// IFD0 entry is Orientation (0x0112), type SHORT, count 1, value 6.
+	tiff := []byte{'M', 'M', 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0}
+	app1 := append([]byte{0xff, 0xe1, 0, 0}, append([]byte("Exif\x00\x00"), tiff...)...)
+	app1[2], app1[3] = byte((len(app1)-2)>>8), byte(len(app1)-2)
+	turned := append(append([]byte{0xff, 0xd8}, app1...), upright[2:]...)
+
+	e := imageEnv()
+	rec := e.postImage("u1", "u2", "", turned)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	var p imagePayload
+	if err := json.Unmarshal(decode[sendResponse](t, rec).Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Width != 21 || p.Height != 31 {
+		t.Errorf("payload is %dx%d, want the drawn 21x31", p.Width, p.Height)
+	}
+	if p.Size != len(turned) {
+		t.Errorf("size = %d, want the length of what was sent (%d)", p.Size, len(turned))
+	}
+}
+
 // What the client says the body is does not matter, in either direction: the type is
 // sniffed from the bytes.
 func TestSendImageIgnoresTheDeclaredContentType(t *testing.T) {

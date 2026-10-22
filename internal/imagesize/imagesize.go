@@ -14,6 +14,11 @@
 // the data that is actually there: a short, truncated or lying file is an error and
 // never a slice panic. A size of zero is an error too, since no picture has one.
 //
+// The size returned is the one a browser DRAWS: a photo with an EXIF orientation that
+// turns it a quarter way round comes back with its sides exchanged (exif.go). That is
+// read where it sits, and only ever refines the answer: a missing or damaged orientation
+// is no turn and never an error.
+//
 // A leaf: standard library only.
 package imagesize
 
@@ -43,20 +48,40 @@ func Accepts(mime string) bool {
 	return false
 }
 
-// Dimensions returns the pixel width and height of data, which the caller has already
-// sniffed to be mime. Both are at least 1.
+// Dimensions returns the pixel width and height of data as a browser will DRAW it,
+// which the caller has already sniffed to be mime. Both are at least 1.
+//
+// That is not always the stored size: a photo from a phone is stored as the sensor saw
+// it with an EXIF orientation saying how to turn it, and for the four orientations that
+// turn it a quarter way round (5 to 8) the stored width is the drawn height. The turn
+// is applied here, for PNG (eXIf), JPEG (APP1) and WebP (EXIF) alike, so that a client
+// laying out a box from these numbers needs no knowledge of EXIF at all; GIF has none.
+// A missing or damaged orientation is no turn and never an error (see exif.go).
 func Dimensions(mime string, data []byte) (width, height int, err error) {
+	orientation := 0
 	switch mime {
 	case "image/png":
-		return pngSize(data)
+		if width, height, err = pngSize(data); err == nil {
+			orientation = pngOrientation(data)
+		}
 	case "image/gif":
-		return gifSize(data)
+		width, height, err = gifSize(data)
 	case "image/webp":
-		return webpSize(data)
+		if width, height, err = webpSize(data); err == nil {
+			orientation = webpOrientation(data)
+		}
 	case "image/jpeg":
-		return jpegSize(data)
+		width, height, orientation, err = jpegSize(data)
+	default:
+		return 0, 0, unreadable("%q is not a format this package reads", mime)
 	}
-	return 0, 0, unreadable("%q is not a format this package reads", mime)
+	if err != nil {
+		return 0, 0, err
+	}
+	if quarterTurned(orientation) {
+		width, height = height, width
+	}
+	return width, height, nil
 }
 
 // positive is the last check every format makes: a picture is at least one pixel each way.
@@ -168,10 +193,11 @@ func webpSize(data []byte) (int, int, error) {
 }
 
 // jpegSize walks the marker segments from the start of the file to the first
-// start-of-frame (SOF) and reads height then width from it. SOF0-3, 5-7, 9-11 and
-// 13-15 are the frame headers (baseline, extended, progressive, lossless and their
-// arithmetic-coded variants); 0xC4 (DHT), 0xC8 (JPG) and 0xCC (DAC) sit in the same
-// range and are not.
+// start-of-frame (SOF) and reads height then width from it, and takes the EXIF
+// orientation from the first APP1 segment that holds an EXIF block on the same pass.
+// SOF0-3, 5-7, 9-11 and 13-15 are the frame headers (baseline, extended, progressive,
+// lossless and their arithmetic-coded variants); 0xC4 (DHT), 0xC8 (JPG) and 0xCC (DAC)
+// sit in the same range and are not.
 //
 // Between segments a marker may be preceded by any number of 0xFF fill bytes, and a few
 // markers have no length at all, so they are stepped over by themselves. Every other
@@ -179,50 +205,77 @@ func webpSize(data []byte) (int, int, error) {
 // the end of the data is an error. The frame header has to come before the start of
 // scan (0xDA), after which the bytes are entropy-coded image data that no marker walk
 // can follow, so reaching a scan or the end of the image first means there is no size.
-func jpegSize(data []byte) (int, int, error) {
+//
+// The walk goes on past the frame header to the scan, because a decoder reads every
+// marker up to there and so honours an EXIF block that sits after it. Once the size is
+// in hand nothing further can fail the read: a damaged segment, the end of the data or
+// a scan end the walk with the size and whatever orientation was found.
+func jpegSize(data []byte) (width, height, orientation int, err error) {
 	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
-		return 0, 0, unreadable("jpeg signature")
+		return 0, 0, 0, unreadable("jpeg signature")
+	}
+	var haveFrame, haveExif bool
+	// stop ends the walk where it cannot go on: an error if there is no size yet, the
+	// answer so far if there is.
+	stop := func(format string, args ...any) (int, int, int, error) {
+		if haveFrame {
+			return width, height, orientation, nil
+		}
+		return 0, 0, 0, unreadable(format, args...)
 	}
 	i := 2
 	for {
 		// Find the next marker: one 0xFF, then any run of further 0xFF fill, then the code.
 		if i >= len(data) || data[i] != 0xff {
-			return 0, 0, unreadable("jpeg: expected a marker at byte %d", i)
+			return stop("jpeg: expected a marker at byte %d", i)
 		}
 		for i < len(data) && data[i] == 0xff {
 			i++
 		}
 		if i >= len(data) {
-			return 0, 0, unreadable("jpeg ends inside a marker")
+			return stop("jpeg ends inside a marker")
 		}
 		code := data[i]
 		i++
 
 		switch {
 		case code == 0x00:
-			return 0, 0, unreadable("jpeg: a stuffed zero where a marker should be")
+			return stop("jpeg: a stuffed zero where a marker should be")
 		case code == 0x01, code >= 0xd0 && code <= 0xd8:
 			// TEM, RSTn and SOI stand alone: no length follows.
 			continue
 		case code == 0xd9, code == 0xda:
-			return 0, 0, unreadable("jpeg has no frame header before its scan")
+			return stop("jpeg has no frame header before its scan")
 		}
 
 		if i+2 > len(data) {
-			return 0, 0, unreadable("jpeg ends inside a segment length")
+			return stop("jpeg ends inside a segment length")
 		}
 		length := int(binary.BigEndian.Uint16(data[i : i+2]))
 		if length < 2 || i+length > len(data) {
-			return 0, 0, unreadable("jpeg segment 0x%02x runs past the end of the file", code)
+			return stop("jpeg segment 0x%02x runs past the end of the file", code)
 		}
-		if isSOF(code) {
+		switch {
+		case isSOF(code) && !haveFrame:
 			// length, precision, height, width, components: 8 bytes at least.
 			if length < 8 {
-				return 0, 0, unreadable("jpeg frame header is %d bytes, want at least 8", length)
+				return 0, 0, 0, unreadable("jpeg frame header is %d bytes, want at least 8", length)
 			}
 			h := int(binary.BigEndian.Uint16(data[i+3 : i+5]))
 			w := int(binary.BigEndian.Uint16(data[i+5 : i+7]))
-			return positive(w, h)
+			var perr error
+			if width, height, perr = positive(w, h); perr != nil {
+				return 0, 0, 0, perr
+			}
+			haveFrame = true
+		case code == 0xe1 && !haveExif:
+			// APP1 also carries XMP, which is not EXIF. The first EXIF block is the one
+			// used, whether or not it yields an orientation: a second would be a file
+			// that disagrees with itself, and a decoder does not go looking for it.
+			if block := data[i+2 : i+length]; len(block) >= len(exifHeader) && string(block[:len(exifHeader)]) == exifHeader {
+				haveExif = true
+				orientation = exifOrientation(block)
+			}
 		}
 		i += length
 	}
