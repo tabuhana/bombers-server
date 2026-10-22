@@ -521,6 +521,20 @@ func cleanBody(raw string) (body, code string) {
 	return body, ""
 }
 
+// cleanCaption is cleanBody for words that may be left out. A picture with no caption,
+// or one whose caption is only whitespace or the bytes plainText drops, has none, and
+// that is the empty string and not the empty_body refusal. Everything else about a
+// caption is cleanBody's because it is cleanBody that is asked: the trim, the 4000
+// characters and what plainText takes out are one rule for a sentence typed to a friend
+// and for the sentence under a picture, and there is no second copy of it to drift.
+func cleanCaption(raw string) (caption, code string) {
+	caption, code = cleanBody(raw)
+	if code == errEmptyBody {
+		return "", ""
+	}
+	return caption, code
+}
+
 // Send persists a DM from the authed user to a recipient. The recipient must be
 // an accepted friend; otherwise the request collapses to an opaque 404 so the
 // sender can't distinguish "not a friend" from "no such user".
@@ -665,13 +679,14 @@ func (h *Handler) answerSend(w http.ResponseWriter, r *http.Request, senderID st
 	httpx.WriteJSON(w, status, sendResponse{messageResponse: msg, Nonce: nonce})
 }
 
-// Edit rewrites the body of a message the authed user sent. An edit ADDS words to
-// a thread, so it needs the friendship that sending needed: after an unfriend or a
-// block the sender can no longer put new text in front of the other person, and no
-// dm frame is pushed to them.
+// Edit rewrites the body of a message the authed user sent - the words of a text
+// message, or the caption of a picture; an invite has none, and the payload of a
+// picture is never editable. An edit ADDS words to a thread, so it needs the
+// friendship that sending needed: after an unfriend or a block the sender can no
+// longer put new text in front of the other person, and no dm frame is pushed to them.
 //
 // Every refusal — someone else's message, a message that does not exist, one
-// already deleted, and a recipient who is no longer a friend — is the same opaque
+// already deleted, an invite, and a recipient who is no longer a friend — is the same opaque
 // 404 message_not_found, so a message id can't be probed for. The order is what
 // keeps it so: the message is looked up scoped to the caller as its sender, so a
 // non-sender is turned away on the lookup alone and never reaches the friendship

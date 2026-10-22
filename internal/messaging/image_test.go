@@ -12,8 +12,10 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
 	"sort"
 	"strconv"
@@ -150,9 +152,44 @@ func testWebP(w, h int) []byte {
 	return append(out, chunk...)
 }
 
-// postImage uploads a picture the way a client does: the raw bytes as the body, the
-// recipient and nonce in the query.
-func (e *env) postImage(user, to, nonce string, body []byte, header ...string) *httptest.ResponseRecorder {
+// formPart is one part of a picture upload as a test wants to send it. filename and
+// contentType are what a client may say about the part and the server must not believe.
+type formPart struct {
+	name, filename, contentType string
+	data                        []byte
+}
+
+func filePart(data []byte) formPart { return formPart{name: "file", filename: "pic", data: data} }
+func captionPart(text string) formPart {
+	return formPart{name: "caption", data: []byte(text)}
+}
+
+// multipartBody builds a multipart/form-data body the way a client does, and returns it
+// with the Content-Type that names its boundary.
+func multipartBody(parts ...formPart) ([]byte, string) {
+	var b bytes.Buffer
+	mw := multipart.NewWriter(&b)
+	for _, p := range parts {
+		h := textproto.MIMEHeader{}
+		disposition := `form-data; name="` + p.name + `"`
+		if p.filename != "" {
+			disposition += `; filename="` + p.filename + `"`
+		}
+		h.Set("Content-Disposition", disposition)
+		if p.contentType != "" {
+			h.Set("Content-Type", p.contentType)
+		}
+		w, err := mw.CreatePart(h)
+		if err != nil {
+			panic(err)
+		}
+		w.Write(p.data)
+	}
+	mw.Close()
+	return b.Bytes(), mw.FormDataContentType()
+}
+
+func imageQuery(to, nonce string) string {
 	q := url.Values{}
 	if to != "" {
 		q.Set("to", to)
@@ -160,13 +197,36 @@ func (e *env) postImage(user, to, nonce string, body []byte, header ...string) *
 	if nonce != "" {
 		q.Set("nonce", nonce)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/messages/image?"+q.Encode(), bytes.NewReader(body))
-	for i := 0; i+1 < len(header); i += 2 {
-		req.Header.Set(header[i], header[i+1])
+	return q.Encode()
+}
+
+// postBody sends exactly the bytes it is given, labelled as it is told: the lowest
+// level, for the tests whose subject is a body that is not what a client sends.
+func (e *env) postBody(user, rawQuery string, body []byte, contentType string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/messages/image?"+rawQuery, bytes.NewReader(body))
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	rec := httptest.NewRecorder()
 	e.router(user).ServeHTTP(rec, req)
 	return rec
+}
+
+// postParts uploads a picture the way a client does: the parts as multipart/form-data,
+// the recipient and nonce in the query.
+func (e *env) postParts(user, to, nonce string, parts ...formPart) *httptest.ResponseRecorder {
+	body, contentType := multipartBody(parts...)
+	return e.postBody(user, imageQuery(to, nonce), body, contentType)
+}
+
+// postImage uploads a picture with no caption.
+func (e *env) postImage(user, to, nonce string, data []byte) *httptest.ResponseRecorder {
+	return e.postParts(user, to, nonce, filePart(data))
+}
+
+// postCaptioned uploads a picture with a caption.
+func (e *env) postCaptioned(user, to, nonce string, data []byte, caption string) *httptest.ResponseRecorder {
+	return e.postParts(user, to, nonce, filePart(data), captionPart(caption))
 }
 
 func (e *env) getImage(user, id string, header ...string) *httptest.ResponseRecorder {
@@ -318,15 +378,19 @@ func TestSendImageStoresTheShapeTheBrowserDraws(t *testing.T) {
 	}
 }
 
-// What the client says the body is does not matter, in either direction: the type is
+// What the client says the file is does not matter, in either direction: the type is
 // sniffed from the bytes.
 func TestSendImageIgnoresTheDeclaredContentType(t *testing.T) {
 	e := imageEnv()
-	if rec := e.postImage("u1", "u2", "", testPNG(t, 4, 4), "Content-Type", "text/plain"); rec.Code != http.StatusCreated {
+	png := filePart(testPNG(t, 4, 4))
+	png.contentType = "text/plain"
+	if rec := e.postParts("u1", "u2", "", png); rec.Code != http.StatusCreated {
 		t.Errorf("a png labelled text/plain = %d %s, want 201", rec.Code, rec.Body)
 	}
 	e2 := imageEnv()
-	rec := e2.postImage("u1", "u2", "", []byte("<html>not a picture</html>"), "Content-Type", "image/png")
+	html := filePart([]byte("<html>not a picture</html>"))
+	html.contentType = "image/png"
+	rec := e2.postParts("u1", "u2", "", html)
 	if rec.Code != http.StatusUnsupportedMediaType || errorCode(t, rec) != "unsupported_media_type" {
 		t.Errorf("html labelled image/png = %d %s, want 415 unsupported_media_type", rec.Code, rec.Body)
 	}
@@ -622,7 +686,8 @@ func TestAClientStillCannotDeclareAnImageKindOrPayload(t *testing.T) {
 		}
 	}
 	// And query parameters of the same names on the picture endpoint do nothing.
-	rec := e.do("u1", http.MethodPost, "/messages/image?to=u2&kind=text&payload=%7B%7D&width=1&height=1", string(testPNG(t, 6, 5)))
+	body, contentType := multipartBody(filePart(testPNG(t, 6, 5)))
+	rec := e.postBody("u1", "to=u2&kind=text&payload=%7B%7D&width=1&height=1", body, contentType)
 	if rec.Code != http.StatusCreated {
 		t.Fatal(rec.Code, rec.Body)
 	}
@@ -822,20 +887,6 @@ func TestDeletingAnythingButAPictureNeverTouchesTheObjectStore(t *testing.T) {
 
 // ---- what a picture is, among messages --------------------------------------------
 
-// There are no words to edit; the answer is the plain "no such message".
-func TestAnImageMessageCannotBeEdited(t *testing.T) {
-	e := imageEnv()
-	id := sentImage(t, e, testPNG(t, 8, 8))
-	e.ln.pushes = nil
-	rec := e.do("u1", http.MethodPatch, "/messages/"+id, jsonBody(t, map[string]any{"body": "a caption"}))
-	if rec.Code != http.StatusNotFound || errorCode(t, rec) != "message_not_found" {
-		t.Errorf("got %d %s, want 404 message_not_found", rec.Code, rec.Body)
-	}
-	if e.db.msgs[0].Body != "" || len(e.ln.pushes) != 0 {
-		t.Error("the edit changed or pushed something")
-	}
-}
-
 // It can be pinned, replied to and reacted to like any other message.
 func TestAnImageMessageCanBePinnedRepliedToAndReactedTo(t *testing.T) {
 	e := imageEnv()
@@ -870,7 +921,7 @@ func TestAnImageMessageIsInTheCatchUpFeedWithItsPayload(t *testing.T) {
 
 // ---- the rules of the payload ---------------------------------------------------
 
-func TestCheckKindPayloadForAnImage(t *testing.T) {
+func TestCheckKindForAnImagePayload(t *testing.T) {
 	good := imagePayload{Width: 1280, Height: 720, Mime: "image/png", Size: 184320}
 	enc := func(mod func(p *imagePayload)) string {
 		p := good
@@ -906,7 +957,7 @@ func TestCheckKindPayloadForAnImage(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkKindPayload(kindImage, []byte(tc.payload))
+			err := checkKind(kindImage, "", []byte(tc.payload))
 			if tc.ok && err != nil {
 				t.Errorf("refused: %v", err)
 			}
@@ -917,19 +968,34 @@ func TestCheckKindPayloadForAnImage(t *testing.T) {
 	}
 }
 
-// Nothing but text has words. A card or a picture with a body is text the server wrote
-// on somebody's behalf, and search would index it.
-func TestOnlyATextMessageMayHaveABody(t *testing.T) {
-	good := []byte(`{"width":1,"height":1,"mime":"image/png","size":1}`)
-	db := newFakeDB("a", "b")
-	if _, err := insertMessage(context.Background(), db, &messageRecord{ID: "m1", SenderID: "a", RecipientID: "b", Kind: kindImage, Payload: good, Body: "caption"}); !errors.Is(err, errBadPayload) {
-		t.Errorf("an image with a caption: err = %v", err)
-	}
-	if _, err := insertMessage(context.Background(), db, &messageRecord{ID: "m2", SenderID: "a", RecipientID: "b", Kind: kindImage, Payload: good}); err != nil {
-		t.Errorf("an image with no words: %v", err)
-	}
-	if len(db.msgs) != 1 {
-		t.Errorf("rows = %d, want 1", len(db.msgs))
+// A text message and a picture's caption have words; a card does not. A card with a
+// body is text the server wrote on somebody's behalf, and search would index it.
+func TestOnlyAMessageWithWordsMayHaveABody(t *testing.T) {
+	image := []byte(`{"width":1,"height":1,"mime":"image/png","size":1}`)
+	invite := []byte(`{"invite_id":"i","room":"r","room_name":"n"}`)
+	for _, tc := range []struct {
+		name    string
+		kind    string
+		body    string
+		payload []byte
+		ok      bool
+	}{
+		{"an image with a caption", kindImage, "a caption", image, true},
+		{"an image with no words", kindImage, "", image, true},
+		{"text with words", kindText, "words", nil, true},
+		{"an invite with no words", kindInvite, "", invite, true},
+		{"an invite with a body", kindInvite, "words", invite, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newFakeDB("a", "b")
+			_, err := insertMessage(context.Background(), db, &messageRecord{ID: "m1", SenderID: "a", RecipientID: "b", Kind: tc.kind, Payload: tc.payload, Body: tc.body})
+			if tc.ok && err != nil || !tc.ok && !errors.Is(err, errBadPayload) {
+				t.Errorf("err = %v, want ok=%v", err, tc.ok)
+			}
+			if wrote := len(db.msgs) == 1; wrote != tc.ok {
+				t.Errorf("rows = %d, want a row only when it is allowed", len(db.msgs))
+			}
+		})
 	}
 }
 

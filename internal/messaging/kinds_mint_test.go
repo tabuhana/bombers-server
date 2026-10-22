@@ -122,35 +122,40 @@ func TestMintInviteCleansTheRoomName(t *testing.T) {
 
 // ---- what a kind may carry --------------------------------------------------
 
-func TestCheckKindPayload(t *testing.T) {
+func TestCheckKind(t *testing.T) {
 	good := `{"invite_id":"i","room":"r","room_name":"n"}`
+	pic := `{"width":1280,"height":720,"mime":"image/png","size":184320}`
 	cases := []struct {
 		name    string
 		kind    string
+		body    string
 		payload string
 		want    error
 	}{
-		{"text, no payload", kindText, "", nil},
-		{"text with a payload", kindText, `{}`, errBadPayload},
-		{"invite", kindInvite, good, nil},
-		{"invite with nothing", kindInvite, "", errBadPayload},
-		{"invite that is not JSON", kindInvite, "room", errBadPayload},
-		{"invite missing its room", kindInvite, `{"invite_id":"i","room_name":"n"}`, errBadPayload},
-		{"invite missing its id", kindInvite, `{"room":"r","room_name":"n"}`, errBadPayload},
-		{"invite missing its name", kindInvite, `{"invite_id":"i","room":"r"}`, errBadPayload},
-		{"invite with a field of its own invention", kindInvite, `{"invite_id":"i","room":"r","room_name":"n","admin":true}`, errBadPayload},
-		{"invite with a second document after it", kindInvite, good + good, errBadPayload},
-		{"image", kindImage, `{"width":1280,"height":720,"mime":"image/png","size":184320}`, nil},
-		{"image with nothing", kindImage, "", errBadPayload},
-		{"image with an empty object", kindImage, `{}`, errBadPayload},
-		{"a word nothing renders", "sticker", `{}`, errUnknownKind},
-		{"no kind at all", "", "", errUnknownKind},
+		{"text, no payload", kindText, "hello", "", nil},
+		{"text with a payload", kindText, "hello", `{}`, errBadPayload},
+		{"invite", kindInvite, "", good, nil},
+		{"invite with nothing", kindInvite, "", "", errBadPayload},
+		{"invite that is not JSON", kindInvite, "", "room", errBadPayload},
+		{"invite missing its room", kindInvite, "", `{"invite_id":"i","room_name":"n"}`, errBadPayload},
+		{"invite missing its id", kindInvite, "", `{"room":"r","room_name":"n"}`, errBadPayload},
+		{"invite missing its name", kindInvite, "", `{"invite_id":"i","room":"r"}`, errBadPayload},
+		{"invite with a field of its own invention", kindInvite, "", `{"invite_id":"i","room":"r","room_name":"n","admin":true}`, errBadPayload},
+		{"invite with a second document after it", kindInvite, "", good + good, errBadPayload},
+		{"invite with words", kindInvite, "come over", good, errBadPayload},
+		{"image", kindImage, "", pic, nil},
+		{"image with a caption", kindImage, "the view", pic, nil},
+		{"image with nothing", kindImage, "", "", errBadPayload},
+		{"image with an empty object", kindImage, "", `{}`, errBadPayload},
+		{"a word nothing renders", "sticker", "", `{}`, errUnknownKind},
+		{"a word nothing renders, with words", "sticker", "hi", `{}`, errUnknownKind},
+		{"no kind at all", "", "", "", errUnknownKind},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkKindPayload(tc.kind, []byte(tc.payload))
+			err := checkKind(tc.kind, tc.body, []byte(tc.payload))
 			if tc.want == nil && err != nil || tc.want != nil && !errors.Is(err, tc.want) {
-				t.Errorf("checkKindPayload(%q, %q) = %v, want %v", tc.kind, tc.payload, err, tc.want)
+				t.Errorf("checkKind(%q, %q, %q) = %v, want %v", tc.kind, tc.body, tc.payload, err, tc.want)
 			}
 		})
 	}
@@ -231,9 +236,11 @@ func TestDeletingAnInviteMessageClearsItsPayload(t *testing.T) {
 func TestSQLKindAndPayloadAreInTheColumnsAndTheWritesThatMatter(t *testing.T) {
 	mustContain(t, "messageColumns", messageColumns, "kind, payload")
 	mustContain(t, "insertMessageSQL", insertMessageSQL, "kind, payload) VALUES", "$7::text, $8::jsonb")
-	// Only text can be edited, in the lookup and in the statement itself.
-	mustContain(t, "ownMessageRecipientSQL", ownMessageRecipientSQL, "AND kind = 'text'")
-	mustContain(t, "editMessageSQL", editMessageSQL, "AND kind = 'text'")
+	// Only a kind with words can be edited, in the lookup and in the statement itself,
+	// and the two spell it with the one constant.
+	mustContain(t, "editableKindsSQL", editableKindsSQL, "kind IN ('text', 'image')")
+	mustContain(t, "ownMessageRecipientSQL", ownMessageRecipientSQL, "AND "+editableKindsSQL)
+	mustContain(t, "editMessageSQL", editMessageSQL, "AND "+editableKindsSQL)
 	// Nothing but the insert writes a kind, and only the delete clears a payload.
 	for name, sql := range map[string]string{
 		"editMessageSQL": editMessageSQL, "pinMessageSQL": pinMessageSQL, "unpinMessageSQL": unpinMessageSQL, "touchMessageSQL": touchMessageSQL,

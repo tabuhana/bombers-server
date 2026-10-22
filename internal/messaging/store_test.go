@@ -324,13 +324,13 @@ func (d *fakeDB) queryRow(sql string, args []any, inTx bool) pgx.Row {
 		return fakeRow{err: pgx.ErrNoRows}
 	case ownMessageRecipientSQL:
 		m := d.find(args[0].(string))
-		if m == nil || m.SenderID != args[1].(string) || m.DeletedAt != nil || m.Kind != kindText {
+		if m == nil || m.SenderID != args[1].(string) || m.DeletedAt != nil || !kindHasWords(m.Kind) {
 			return fakeRow{err: pgx.ErrNoRows}
 		}
 		return fakeRow{vals: []any{m.RecipientID}}
 	case editMessageSQL:
 		m := d.find(args[0].(string))
-		if m == nil || m.SenderID != args[1].(string) || m.DeletedAt != nil || m.Kind != kindText {
+		if m == nil || m.SenderID != args[1].(string) || m.DeletedAt != nil || !kindHasWords(m.Kind) {
 			return fakeRow{err: pgx.ErrNoRows}
 		}
 		d.seq++

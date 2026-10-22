@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -43,13 +45,13 @@ type ObjectStore interface {
 func ImagePrefix(messageID string) string { return "messages/" + messageID + "/" }
 func imageKey(messageID string) string    { return ImagePrefix(messageID) + "image" }
 
-// SendImage is the other way to send: a picture, as the raw bytes of the request body,
-// to the friend named in ?to=. It is POST /messages for a message that is an image, and
-// it takes the same trouble over WHO may be sent to: the same friendship gate with the
+// SendImage is the other way to send: a picture, as a multipart/form-data body, to the
+// friend named in ?to=. It is POST /messages for a message that is an image, and it
+// takes the same trouble over WHO may be sent to: the same friendship gate with the
 // same opaque 404 (sendTarget), the same nonce idempotency (taken from ?nonce=, because
-// the body is the picture), and the same write under the seq lock (storeOnce). Only what
-// is being sent differs, and that is read here from bytes the server has itself looked
-// at.
+// addressing is not content), and the same write under the seq lock (storeOnce). Only
+// what is being sent differs, and that is read here from bytes the server has itself
+// looked at.
 //
 // THE RULE still holds: a client does not declare a kind. Nothing about the message is
 // the client's word - not that it is an image, not its type, not its size, not its
@@ -58,14 +60,18 @@ func imageKey(messageID string) string    { return ImagePrefix(messageID) + "ima
 // A body that cannot be measured is refused, never stored without its size: a kind whose
 // payload is sometimes incomplete pushes that problem into every client that draws it.
 //
-// The picture IS the message: the body is empty and a sentence about it is a second
-// message.
+// The words under the picture are the message's BODY, which a client has always been
+// the one to supply, and they go through the one rule a text body goes through
+// (cleanCaption, which is cleanBody): they travel in the same request as the bytes so
+// that there is one message, one row and one frame, not a picture and a caption that
+// arrives a beat later. A picture with no words has an empty body.
 //
 // The order, and why:
 //
 //  1. the friendship gate, before the body is read, so a stranger cannot make the
 //     server buffer ten megabytes;
-//  2. read under the cap, sniff, measure;
+//  2. read the parts under the caps (readImageUpload), clean the caption, sniff and
+//     measure the file;
 //  3. put the bytes;
 //  4. insert the row.
 //
@@ -97,19 +103,14 @@ func (h *Handler) SendImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxImageBytes))
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			httpx.WriteError(w, http.StatusRequestEntityTooLarge, errMessageTooLarge)
-			return
-		}
-		httpx.WriteError(w, http.StatusBadRequest, "could not read request body")
+	upload, ok := readImageUpload(w, r)
+	if !ok {
 		return
 	}
+	data := upload.data
 
-	// The declared Content-Type is ignored: a mislabeled or malicious body can't
-	// smuggle a non-image in, and a picture can't claim to be a type it is not.
+	// The declared Content-Type of the part is ignored: a mislabeled or malicious file
+	// can't smuggle a non-image in, and a picture can't claim to be a type it is not.
 	mime := http.DetectContentType(data)
 	if !imagesize.Accepts(mime) {
 		httpx.WriteError(w, http.StatusUnsupportedMediaType, errUnsupportedType)
@@ -143,6 +144,7 @@ func (h *Handler) SendImage(w http.ResponseWriter, r *http.Request) {
 		ID:          id,
 		SenderID:    senderID,
 		RecipientID: recipientID,
+		Body:        upload.caption,
 		Nonce:       nonce,
 		Kind:        kindImage,
 		Payload:     raw,
@@ -160,6 +162,136 @@ func (h *Handler) SendImage(w http.ResponseWriter, r *http.Request) {
 		h.removeImage(r.Context(), id)
 	}
 	h.answerSend(w, r, senderID, saved, created, nonce)
+}
+
+// The parts of a picture upload. They are the whole vocabulary: any other part is a
+// refusal, which is how a client naming a `kind` here is told no as it is on
+// POST /messages.
+const (
+	imageFormFile    = "file"
+	imageFormCaption = "caption"
+
+	// maxCaptionBytes is how much of a caption part is read: what a whole text send is
+	// allowed to be, so a caption is bounded the way a body is. It is a bound on memory
+	// and not the rule for the words - that is cleanBody's 4000 characters.
+	maxCaptionBytes = sendBodyLimit
+	// maxImageRequestBytes bounds the request as a whole: the largest picture, the
+	// largest caption, and room for the boundary lines and part headers around them.
+	// A request that goes past it is not read further, whatever its parts claim.
+	maxImageRequestBytes = maxImageBytes + maxCaptionBytes + 16<<10
+)
+
+// imageUpload is what a picture request holds once it has been read: the bytes of the
+// file, which are not yet known to be a picture, and the caption as it will be stored.
+type imageUpload struct {
+	data    []byte
+	caption string
+}
+
+// readImageUpload reads the multipart body of POST /messages/image. It writes the
+// refusal itself, as sendTarget does, and reports whether the send may go on.
+//
+// The parts are read one at a time off the stream (multipart.Reader, never
+// ParseMultipartForm, which would spool a part to a temporary file on disk), under
+// three caps: the request as a whole, the file part at maxImageBytes and the caption
+// part at maxCaptionBytes. Nothing bigger than those is ever held. The parts may come
+// in either order; `file` and `caption` may each appear once, and any other part is
+// refused unread. The raw part is taken (NextRawPart): the bytes the server sniffs are
+// the bytes that were sent, not what a Content-Transfer-Encoding header asked to be
+// undone.
+//
+// Every refusal is one this endpoint or POST /messages already had: 413
+// message_too_large for anything past a cap, 400 invalid_body for a body that is not
+// multipart, is cut short, has no file or has a part this does not take, and 400
+// body_too_long for a caption past the rule a text body is held to. Nothing a client
+// sends is a 500. What depends on what the parts say is checked after all of them are
+// read, in a fixed order (structure, then the caption, then, in SendImage, the file),
+// so the answer does not depend on which part came first.
+func readImageUpload(w http.ResponseWriter, r *http.Request) (up imageUpload, ok bool) {
+	// multipart/form-data and nothing else: http.Request.MultipartReader would take
+	// multipart/mixed too, which is not what this endpoint is documented to read.
+	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/form-data" || params["boundary"] == "" {
+		httpx.WriteError(w, http.StatusBadRequest, errInvalidBody)
+		return up, false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxImageRequestBytes)
+	mr := multipart.NewReader(r.Body, params["boundary"])
+
+	var rawCaption []byte
+	var haveFile, haveCaption, captionTooLong bool
+	for {
+		part, err := mr.NextRawPart()
+		// Compared, not errors.Is: a body that ends without its closing boundary comes
+		// back as a WRAPPED io.EOF, which is a cut-off body and not the end of the parts.
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			refuseUnreadable(w, err)
+			return up, false
+		}
+		switch part.FormName() {
+		case imageFormFile:
+			if haveFile {
+				httpx.WriteError(w, http.StatusBadRequest, errInvalidBody)
+				return up, false
+			}
+			haveFile = true
+			// One byte past the cap, to tell a picture of exactly maxImageBytes from one
+			// that is larger.
+			if up.data, err = io.ReadAll(io.LimitReader(part, maxImageBytes+1)); err != nil {
+				refuseUnreadable(w, err)
+				return up, false
+			}
+			if len(up.data) > maxImageBytes {
+				httpx.WriteError(w, http.StatusRequestEntityTooLarge, errMessageTooLarge)
+				return up, false
+			}
+		case imageFormCaption:
+			if haveCaption {
+				httpx.WriteError(w, http.StatusBadRequest, errInvalidBody)
+				return up, false
+			}
+			haveCaption = true
+			if rawCaption, err = io.ReadAll(io.LimitReader(part, maxCaptionBytes+1)); err != nil {
+				refuseUnreadable(w, err)
+				return up, false
+			}
+			captionTooLong = len(rawCaption) > maxCaptionBytes
+		default:
+			httpx.WriteError(w, http.StatusBadRequest, errInvalidBody)
+			return up, false
+		}
+	}
+	if !haveFile {
+		httpx.WriteError(w, http.StatusBadRequest, errInvalidBody)
+		return up, false
+	}
+
+	if captionTooLong {
+		httpx.WriteError(w, http.StatusBadRequest, errBodyTooLong)
+		return up, false
+	}
+	caption, code := cleanCaption(string(rawCaption))
+	if code != "" {
+		httpx.WriteError(w, http.StatusBadRequest, code)
+		return up, false
+	}
+	up.caption = caption
+	return up, true
+}
+
+// refuseUnreadable answers a request body that could not be read to the end: past the
+// request cap is the same 413 as a picture past its own, and anything else - not
+// multipart, a part cut short, a header that is not one - is a body that was not valid.
+func refuseUnreadable(w http.ResponseWriter, err error) {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		httpx.WriteError(w, http.StatusRequestEntityTooLarge, errMessageTooLarge)
+		return
+	}
+	httpx.WriteError(w, http.StatusBadRequest, errInvalidBody)
 }
 
 // ServeImage streams a message's picture back, through the server, with the caller's

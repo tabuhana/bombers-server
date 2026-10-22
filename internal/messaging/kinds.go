@@ -14,7 +14,7 @@ import (
 
 // A message has a KIND. Today there are three, a closed set (the column has a CHECK
 // that says so): text, which is everything a person types; invite, which says "come
-// to my room"; and image, which is a picture.
+// to my room"; and image, which is a picture and may carry a caption.
 //
 // THE RULE: A CLIENT CANNOT DECLARE A KIND. POST /messages is text-only and refuses a
 // request that names any other. If a client could post an invite with a room id in its
@@ -23,7 +23,9 @@ import (
 // about and anyone can forge. The server MINTS the non-text kinds itself, from state it
 // owns: an invite message is written when the invite is made (MintInvite), and an
 // image message is written by SendImage (image.go) from bytes it has itself read,
-// sniffed and measured - a client supplies a picture, never a claim about one.
+// sniffed and measured - a client supplies a picture, never a claim about one. The words
+// under it are its body, which a client has always been the one to supply; they are not a
+// kind and not a claim.
 const (
 	kindText   = "text"
 	kindInvite = "invite"
@@ -74,7 +76,8 @@ const (
 
 // check is the shape an image payload must have to be stored. That Size is the length
 // of the bytes actually stored is not something it can see: SendImage builds the
-// payload from the very slice it writes, so the two cannot differ.
+// payload from the very slice it writes, so the two cannot differ. The caption is not
+// here: it is the message's body, not part of the picture's payload.
 func (p imagePayload) check() error {
 	switch {
 	case p.Width < 1 || p.Height < 1:
@@ -97,16 +100,26 @@ func decodeStrict(payload []byte, v any) bool {
 	return dec.Decode(v) == nil && !dec.More()
 }
 
-// checkKindPayload is the one place that says what a kind may carry. The server
-// does not interpret a payload beyond this: it refuses a kind it does not know, and a
-// payload that is not the shape of the kind it is storing.
-func checkKindPayload(kind string, payload []byte) error {
+// kindHasWords is whether a kind of message can carry a body a person typed: text, and
+// a picture's caption. An invite cannot, because what it says is its payload, and a
+// sentence stored beside a card would be English the server wrote on the sender's behalf,
+// which search would index as if they had typed it. It is the one answer to "may this
+// kind have words?": checkKind asks it before a row is written, and editableKindsSQL
+// (store.go) is the same set for the statements that rewrite one.
+func kindHasWords(kind string) bool { return kind == kindText || kind == kindImage }
+
+// checkKind is the one place that says what a kind may carry, words and payload both.
+// The server does not interpret a payload beyond this: it refuses a kind it does not
+// know, a payload that is not the shape of the kind it is storing, and words on a kind
+// that has none. What the words may be (trimmed, at most maxBody characters, free of
+// what Postgres refuses) is the handler's call, made by cleanBody before a message
+// gets here; a text message with no body is not refused at this layer.
+func checkKind(kind, body string, payload []byte) error {
 	switch kind {
 	case kindText:
 		if len(payload) != 0 {
 			return fmt.Errorf("%w: a text message has no payload", errBadPayload)
 		}
-		return nil
 	case kindInvite:
 		var p invitePayload
 		if !decodeStrict(payload, &p) {
@@ -115,15 +128,21 @@ func checkKindPayload(kind string, payload []byte) error {
 		if p.InviteID == "" || p.Room == "" || p.RoomName == "" {
 			return fmt.Errorf("%w: invite needs invite_id, room and room_name", errBadPayload)
 		}
-		return nil
 	case kindImage:
 		var p imagePayload
 		if !decodeStrict(payload, &p) {
 			return fmt.Errorf("%w: image", errBadPayload)
 		}
-		return p.check()
+		if err := p.check(); err != nil {
+			return err
+		}
+	default:
+		return errUnknownKind
 	}
-	return errUnknownKind
+	if body != "" && !kindHasWords(kind) {
+		return fmt.Errorf("%w: a %s message has no body", errBadPayload, kind)
+	}
+	return nil
 }
 
 // MintInvite writes the message that says "come to my room": from the inviter to the

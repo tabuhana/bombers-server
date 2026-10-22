@@ -135,9 +135,9 @@ var errPinLimit = errors.New("too many pins")
 //
 // kind and payload are written here and nowhere else, and are always spelled out:
 // the column default is a backstop for rows that predate kinds, not something this
-// code leans on. Whether a kind may be written, and with what payload, is
-// checkKindPayload's call, made before the statement runs; the CHECK on the column
-// is the last line.
+// code leans on. Whether a kind may be written, and with what payload and words, is
+// checkKind's call, made before the statement runs; the CHECK on the column is the
+// last line.
 const insertMessageSQL = `
 INSERT INTO messages (id, sender_id, recipient_id, body, created_at, nonce, reply_to_id, kind, payload)
 VALUES ($1, $2, $3, $4, clock_timestamp(), NULLIF($5::text, ''), $6::text, $7::text, $8::jsonb)
@@ -145,14 +145,8 @@ RETURNING ` + messageColumns + `
 `
 
 func insertMessage(ctx context.Context, db dbExecutor, m *messageRecord) (*messageRecord, error) {
-	if err := checkKindPayload(m.Kind, m.Payload); err != nil {
+	if err := checkKind(m.Kind, m.Body, m.Payload); err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
-	}
-	// The words of a card or a picture are empty: what it says is its payload, and a
-	// sentence stored beside one would be text the server wrote on the sender's behalf,
-	// and search would index it as if they had typed it.
-	if m.Kind != kindText && m.Body != "" {
-		return nil, fmt.Errorf("insert message: %w: only text has a body", errBadPayload)
 	}
 	out, err := scanMessage(db.QueryRow(ctx, insertMessageSQL, m.ID, m.SenderID, m.RecipientID, m.Body, m.Nonce, m.ReplyToID, m.Kind, m.Payload))
 	if err != nil {
@@ -205,20 +199,27 @@ func insertOnce(ctx context.Context, db dbExecutor, m *messageRecord) (saved *me
 	return saved, true, nil
 }
 
+// editableKindsSQL is the kinds an edit may rewrite, spelled as the condition both
+// statements below put in their WHERE. It is the set kindHasWords answers for, written
+// out because a statement cannot call Go, and it is one constant so the lookup and the
+// UPDATE cannot disagree about it; a test holds it to kindHasWords over every kind.
+const editableKindsSQL = `kind IN ('text', 'image')`
+
 // ownMessageRecipientSQL names who a live message of the caller's was sent to. It
 // is scoped to the sender and to a live row exactly as editMessageSQL is, so a
 // message that is someone else's, missing or deleted is zero rows here too: the
 // friendship gate on an edit needs the recipient, and the only person who may learn
 // it is the one who sent the message.
 //
-// Only a TEXT message can be edited: an edit rewrites words, and an invite or a
-// picture has none to rewrite. A card is not a body somebody typed, so a body put
-// on one would be text standing in for a thing the server minted. The kind is in the
-// lookup, so an attempt to edit one is the same zero rows as any other message that
-// cannot be edited, and the same opaque 404.
+// Only a message with words can be edited: an edit rewrites a body, and a text message
+// and a picture's caption have one while an invite has none to rewrite. A card is not a
+// body somebody typed, so a body put on one would be text standing in for a thing the
+// server minted. The kind is in the lookup, so an attempt to edit one is the same zero
+// rows as any other message that cannot be edited, and the same opaque 404. Only the
+// body is ever rewritten: the payload of a picture is not editable.
 const ownMessageRecipientSQL = `
 SELECT recipient_id FROM messages
-WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL AND kind = 'text'
+WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL AND ` + editableKindsSQL + `
 `
 
 // ownMessageRecipient returns the recipient of a live message sent by senderID, or
@@ -244,7 +245,7 @@ func ownMessageRecipient(ctx context.Context, db dbExecutor, id, senderID string
 const editMessageSQL = `
 UPDATE messages
 SET body = $3, edited_at = now(), seq = nextval('messages_seq')
-WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL AND kind = 'text'
+WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL AND ` + editableKindsSQL + `
 RETURNING ` + messageColumns + `
 `
 
