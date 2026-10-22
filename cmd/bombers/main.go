@@ -430,7 +430,17 @@ func buildAndServe() (*app, error) {
 	messagingHandler := messaging.NewHandler(pool, notifyHub.SendMany)
 	// A file offer is a nudge to one friend and nothing else: transfers is handed
 	// the hub's fan-out like messaging is, and learns nothing about sockets.
-	transfersHandler := transfers.NewHandler(pool, notifyHub.SendMany)
+	transfersHandler, err := transfers.NewHandler(pool, notifyHub.SendMany, cfg.ICEStunURLs)
+	if err != nil {
+		// A bad ICE list is an operator mistake, and serving a list that cannot work
+		// (or a TURN one) to every client is worse than not starting. The DB is
+		// already live by here, so release it as the media failure above does.
+		pool.Close()
+		if epg != nil {
+			_ = epg.Stop()
+		}
+		return nil, fmt.Errorf("ICE_STUN_URLS: %w", err)
+	}
 	syncHandler := sync.NewHandler(pool)
 	nodesHandler := nodes.NewHandler(pool)
 	nodeshareHandler := nodeshare.NewHandler(pool)
@@ -489,6 +499,9 @@ func buildAndServe() (*app, error) {
 	r.Group(func(r chi.Router) {
 		r.Use(issuer.RequireAuth)
 		r.Get("/me", usersHandler.Me)
+		// The STUN servers a peer-to-peer transfer should use to find a route. Any
+		// authed caller may ask; it reveals nothing about anyone.
+		r.Get("/ice", transfersHandler.ICE)
 		// Token scope: browsing and downloading this server's shelves.
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreRead))

@@ -98,6 +98,13 @@ type Config struct {
 	S3SecretKey string
 	S3Bucket    string
 	S3UseSSL    bool
+
+	// ICEStunURLs is the comma-separated STUN list GET /ice hands to clients, so
+	// a peer-to-peer file transfer finds its route through a server this
+	// deployment chose and not one it was never asked about. Empty means the
+	// public default. It is kept as the raw string: transfers owns what a valid
+	// entry is (and refuses a TURN one), so the rule lives in one place.
+	ICEStunURLs string
 }
 
 func Load() (*Config, error) {
@@ -166,6 +173,7 @@ func Load() (*Config, error) {
 		S3SecretKey:         requireS3("S3_SECRET_KEY"),
 		S3Bucket:            optional("S3_BUCKET", defaultS3Bucket),
 		S3UseSSL:            os.Getenv("S3_USE_SSL") == "true",
+		ICEStunURLs:         os.Getenv("ICE_STUN_URLS"),
 	}
 
 	if len(missing) > 0 {

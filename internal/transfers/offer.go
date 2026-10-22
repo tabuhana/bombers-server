@@ -1,8 +1,9 @@
 // Package transfers is the doorbell for a file going straight from one person to
 // another. The bytes never touch this server: the two clients open a WebRTC data
 // channel between themselves (over a room, which is only the place they find each
-// other), and this package does the one thing the clients cannot do for
-// themselves — tell the receiver a file is on its way.
+// other), and this package does the two things the clients cannot do for
+// themselves — tell the receiver a file is on its way, and hand both ends the
+// ICE servers to find a route with.
 //
 // The offer is a nudge, not a message, and that is deliberate. A file offer that
 // lived in a DM would sit in history forever, name a room that is long gone, and
@@ -79,10 +80,19 @@ type friendChecker interface {
 type Handler struct {
 	db     friendChecker
 	notify Notify
+	ice    []string
 }
 
-func NewHandler(db friendChecker, notify Notify) *Handler {
-	return &Handler{db: db, notify: notify}
+// NewHandler builds the handler. stunCSV is the operator's ICE_STUN_URLS (empty
+// means DefaultSTUN); it is checked here, and an entry that is not a stun: or
+// stuns: URL — a TURN server above all — is an error rather than something
+// served to every client.
+func NewHandler(db friendChecker, notify Notify, stunCSV string) (*Handler, error) {
+	stun, err := ParseSTUN(stunCSV)
+	if err != nil {
+		return nil, err
+	}
+	return &Handler{db: db, notify: notify, ice: stun}, nil
 }
 
 // offerRequest is what a sender posts: who it is for, which room the sender is

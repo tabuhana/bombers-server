@@ -82,7 +82,11 @@ type env struct {
 func newEnv() *env {
 	db := &fakeDB{}
 	ln := &listener{}
-	return &env{db: db, ln: ln, h: NewHandler(db, ln.notify)}
+	h, err := NewHandler(db, ln.notify, "")
+	if err != nil {
+		panic(err)
+	}
+	return &env{db: db, ln: ln, h: h}
 }
 
 // router mounts the handler as main.go does, as the given user.
@@ -232,7 +236,10 @@ func TestOfferWhenTheFriendCheckFailsIsTheSameOpaque404(t *testing.T) {
 func TestOfferWithNoListenerIsStillA204(t *testing.T) {
 	db := &fakeDB{}
 	db.befriend("alice", "bob")
-	h := NewHandler(db, nil)
+	h, err := NewHandler(db, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
