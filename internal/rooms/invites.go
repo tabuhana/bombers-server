@@ -148,8 +148,10 @@ func (r *Room) disposeInvitesLocked() {
 // Each change is queued for the inviter and the invitee, the way an answer is
 // announced; a kick with no invite in play queues nothing. Lapsed ones are settled
 // first, so an invite that had run out is reported as expired, not as declined.
-// Caller holds r.mu and must flush after releasing it.
-func (r *Room) voidInvitesForLocked(userID string, now time.Time) {
+// It returns how many it voided: Kick uses that to tell an absent person with
+// something to revoke from one with nothing. Caller holds r.mu and must flush
+// after releasing it.
+func (r *Room) voidInvitesForLocked(userID string, now time.Time) (voided int) {
 	for _, inv := range r.invites {
 		if inv.To != userID {
 			continue
@@ -158,8 +160,10 @@ func (r *Room) voidInvitesForLocked(userID string, now time.Time) {
 		if inv.State == InvitePending || inv.State == InviteAccepted {
 			inv.State = InviteDeclined
 			r.voided = append(r.voided, r.copyLocked(inv))
+			voided++
 		}
 	}
+	return voided
 }
 
 // flushExpired hands the invites that expired since the last flush to the room's

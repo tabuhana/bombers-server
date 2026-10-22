@@ -492,3 +492,111 @@ func TestAKickWithNoInviteInPlayDoesNothingOdd(t *testing.T) {
 		t.Fatalf("a kick with no invite left %d invite(s) behind", len(room.invites))
 	}
 }
+
+// A kick revokes a credential as well as a connection, so it must reach someone who
+// is not connected but holds a way back in.
+
+func TestAKickReachesAnAbsentHolderOfAnAcceptedInvite(t *testing.T) {
+	g, room, conns := memberInvitesRoom(t)
+	ctx := t.Context()
+	setMemberInvites(g, room, "host", `{"allow":true}`, conns["host"])
+	inv := samAccepts(g, room) // sam accepted but never connected (or has since dropped)
+	if !g.h.allowed(ctx, room, "sam") {
+		t.Fatal("setup: the accepted invite should admit")
+	}
+
+	err := room.Kick("host", "sam", g.clock)
+
+	if err != nil {
+		t.Fatalf("kicking an absent holder of an invite: %v", err)
+	}
+	if g.h.allowed(ctx, room, "sam") {
+		t.Fatal("the absent holder can still connect after being kicked")
+	}
+	if rec := getRoom(g.h, "room1", "sam"); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want the opaque 404", rec.Code)
+	}
+	if rec := g.accept("sam", inv.ID); rec.Code != http.StatusConflict {
+		t.Fatalf("accepting a voided invite: status = %d, want 409", rec.Code)
+	}
+	if lastState(g, "sam") != InviteDeclined || lastState(g, "bob") != InviteDeclined {
+		t.Fatalf("both ends should hear declined: sam=%q bob=%q", lastState(g, "sam"), lastState(g, "bob"))
+	}
+}
+
+func TestAKickReachesAnAbsentHolderOfAPendingInvite(t *testing.T) {
+	g, room, conns := memberInvitesRoom(t)
+	setMemberInvites(g, room, "host", `{"allow":true}`, conns["host"])
+	inv := decodeInvite(t, g.invite("room1", "bob", "sam"))
+
+	if err := room.Kick("host", "sam", g.clock); err != nil {
+		t.Fatalf("kicking an absent holder of a pending invite: %v", err)
+	}
+	if rec := g.accept("sam", inv.ID); rec.Code != http.StatusConflict {
+		t.Fatalf("accepting a voided invite: status = %d, want 409", rec.Code)
+	}
+	if got := g.list("sam"); len(got) != 0 {
+		t.Fatalf("a voided invite is still listed as waiting: %+v", got)
+	}
+}
+
+func TestAKickWithNeitherAConnectionNorAnInviteStillRefuses(t *testing.T) {
+	g, room, conns := memberInvitesRoom(t)
+	if err := room.Kick("host", "sam", g.clock); err == nil {
+		t.Fatal("kicking someone with no connection and no invite should still refuse")
+	}
+	// An invite that can no longer let anyone in is nothing to revoke either: a
+	// declined one, and one whose hour has run out.
+	setMemberInvites(g, room, "host", `{"allow":true}`, conns["host"])
+	declined := decodeInvite(t, g.invite("room1", "bob", "sam"))
+	g.decline("sam", declined.ID)
+	if err := room.Kick("host", "sam", g.clock); err == nil {
+		t.Fatal("a declined invite is nothing to revoke; the kick should refuse")
+	}
+	g.befriend("bob", "kim")
+	g.invite("room1", "bob", "kim")
+	g.advance(2 * InviteTTL)
+	if err := room.Kick("host", "kim", g.clock); err == nil {
+		t.Fatal("an expired invite is nothing to revoke; the kick should refuse")
+	}
+}
+
+func TestKickingAnAbsentHolderTellsNoSocketAndLeavesTheRosterAlone(t *testing.T) {
+	g, room, conns := memberInvitesRoom(t)
+	setMemberInvites(g, room, "host", `{"allow":true}`, conns["host"])
+	samAccepts(g, room)
+	rosterBefore := room.Members()
+	bobBefore, hostBefore := len(conns["bob"].frames), len(conns["host"].frames)
+
+	if err := room.Kick("host", "sam", g.clock); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := room.Members(); len(got) != len(rosterBefore) {
+		t.Fatalf("the roster changed for someone who was never in it: %+v -> %+v", rosterBefore, got)
+	}
+	if len(conns["bob"].frames) != bobBefore || len(conns["host"].frames) != hostBefore {
+		t.Fatalf("members were sent frames about someone who was never there: bob %v, host %v",
+			conns["bob"].types()[bobBefore:], conns["host"].types()[hostBefore:])
+	}
+	for _, id := range []string{"host", "bob"} {
+		if conns[id].count(TypeKicked) != 0 || conns[id].count(TypeLeave) != 0 {
+			t.Fatalf("%s saw a kicked/leave frame for an absent person: %v", id, conns[id].types())
+		}
+	}
+}
+
+func TestOnlyTheHostMayKickAnAbsentHolderAndNeverItself(t *testing.T) {
+	g, room, conns := memberInvitesRoom(t)
+	setMemberInvites(g, room, "host", `{"allow":true}`, conns["host"])
+	samAccepts(g, room)
+	if err := room.Kick("bob", "sam", g.clock); err != ErrNotHost {
+		t.Fatalf("a member kicking an absent holder: %v, want ErrNotHost", err)
+	}
+	if !g.h.allowed(t.Context(), room, "sam") {
+		t.Fatal("a refused kick voided the invite")
+	}
+	if err := room.Kick("host", "host", g.clock); err == nil {
+		t.Fatal("the host must still not be able to kick themselves")
+	}
+}

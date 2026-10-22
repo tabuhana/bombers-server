@@ -347,6 +347,11 @@ func (r *Room) SetActivity(byUserID, activityID string) error {
 // only for the moment. THAT ASYMMETRY IS DELIBERATE: a kick is not a ban, making
 // it one is a different feature nobody has asked for, and voiding the invite is
 // as far as this goes. Do not "fix" it.
+//
+// The target need not be in the room: someone absent who holds a pending or
+// accepted invite is kicked too (their invite is voided, nothing is sent to a
+// socket that is not there and the roster is left alone). Only a target who is
+// neither here nor holds an invite is refused, because then there is nothing to do.
 func (r *Room) Kick(byUserID, targetID string, now time.Time) error {
 	defer r.flushExpired()
 	r.mu.Lock()
@@ -364,8 +369,18 @@ func (r *Room) Kick(byUserID, targetID string, now time.Time) error {
 	}
 	target, ok := r.members[targetID]
 	if !ok {
+		// Not here right now. That is only worth refusing when there is nothing to
+		// do - and a kick revokes a credential as well as a connection, so someone
+		// absent who holds a way back in (a pending or accepted invite) is exactly
+		// who the host most needs to be able to remove. Void it and succeed. There
+		// is no socket to tell, no roster entry to change (they are not in it) and
+		// no room:kicked to send; the invite frame tells both ends.
+		voided := r.voidInvitesForLocked(targetID, now)
 		r.mu.Unlock()
-		return errors.New("not in this room")
+		if voided == 0 {
+			return errors.New("not in this room")
+		}
+		return nil
 	}
 
 	// Tell them first — after removal they're no longer a broadcast target.

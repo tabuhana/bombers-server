@@ -232,8 +232,11 @@ func TestKickRefusals(t *testing.T) {
 	if err := room.Kick("host", "host", time.Now()); err == nil {
 		t.Error("the host must not be able to kick themselves - that's ending the room")
 	}
+	// Not here AND no invite to revoke: there is genuinely nothing to do, so the
+	// refusal stays honest. (Absent with an invite is a kick that succeeds; see
+	// member_invites_test.go.)
 	if err := room.Kick("host", "nobody", time.Now()); err == nil {
-		t.Error("kicking someone who isn't here should fail")
+		t.Error("kicking someone who is neither here nor holds an invite should fail")
 	}
 }
 
