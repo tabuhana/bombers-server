@@ -225,7 +225,7 @@ startup. Anything the environment doesn't set falls back to the saved
 | `DISCORD_CLIENT_SECRET` | to sign anyone in         | —                        | Lives here and never in the client — a desktop app can't keep a secret. |
 | `DISCORD_REDIRECT_URL` | to sign anyone in          | —                        | Must match a redirect registered on the Discord app **exactly**. |
 | `SIGNUP_MODE`         | no                          | `list`                   | `list` (only Discord ids on the allowlist may create an account) or `open`. |
-| `STUN_SERVERS`       | no                          | Google's two public STUN | Comma-separated `stun:host[:port]` / `stuns:` URLs clients use to connect file transfers directly. A `turn:` entry is refused at startup, because transfers are never relayed through a server. |
+| `ICE_STUN_URLS`       | no                          | Google's two public STUN | Comma-separated `stun:host[:port]` / `stuns:` URLs clients use to connect file transfers directly. A `turn:` entry is refused at startup, because transfers are never relayed through a server. |
 | `AUTO_MIGRATE`        | no                          | `false`                  | Apply pending migrations at startup (for container hosts). |
 | `LOG_TIME_FORMAT`     | no                          | `datetime`               | `time` · `datetime` · `iso`. The console's `logtime` switches it live. |
 | `BOMBERS_DATA_DIR`    | no                          | per-OS config dir        | Override where config, logs, media and the embedded DB live. |

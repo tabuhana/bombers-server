@@ -429,7 +429,7 @@ func buildAndServe() (*app, error) {
 	// handed the hub's fan-out as it is.
 	messagingHandler := messaging.NewHandler(pool, notifyHub.SendMany)
 	// The STUN list a peer-to-peer transfer connects with (GET /ice).
-	transfersHandler, err := transfers.NewHandler(cfg.STUNServers)
+	transfersHandler, err := transfers.NewHandler(cfg.ICEStunURLs)
 	if err != nil {
 		// config.Load already refused a bad ICE list, so this cannot happen from the
 		// environment; it stands as the backstop for the handler's own check. The DB
@@ -438,7 +438,7 @@ func buildAndServe() (*app, error) {
 		if epg != nil {
 			_ = epg.Stop()
 		}
-		return nil, fmt.Errorf("STUN_SERVERS: %w", err)
+		return nil, fmt.Errorf("ICE_STUN_URLS: %w", err)
 	}
 	syncHandler := sync.NewHandler(pool)
 	nodesHandler := nodes.NewHandler(pool)

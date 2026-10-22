@@ -128,14 +128,14 @@ type Config struct {
 	S3Bucket    string
 	S3UseSSL    bool
 
-	// STUNServers is the STUN list GET /ice hands to clients (from STUN_SERVERS),
+	// ICEStunURLs is the STUN list GET /ice hands to clients (from ICE_STUN_URLS),
 	// so a peer-to-peer file transfer finds its route through a server this
 	// deployment chose and not one it was never asked about. It is already parsed
 	// and never empty: Load applies the public default when the variable is unset.
 	// transfers owns what a valid entry is (and refuses a TURN one), so the rule
 	// lives in one place — and Load applies it, so a bad value stops the server
 	// before the database or anything else is started.
-	STUNServers []string
+	ICEStunURLs []string
 }
 
 // Load reads and CHECKS the whole environment, and it is the only place that
@@ -265,11 +265,11 @@ func Load() (*Config, error) {
 	// Checked here, with the rest of the configuration, so that a typo (or a TURN
 	// server) is refused before Postgres starts or a connection opens. The error
 	// names the variable; ParseSTUN's own text names the offending value.
-	stun, err := transfers.ParseSTUN(os.Getenv("STUN_SERVERS"))
+	stun, err := transfers.ParseSTUN(os.Getenv("ICE_STUN_URLS"))
 	if err != nil {
-		fail(fmt.Errorf("STUN_SERVERS: %w", err))
+		fail(fmt.Errorf("ICE_STUN_URLS: %w", err))
 	}
-	cfg.STUNServers = stun
+	cfg.ICEStunURLs = stun
 
 	if len(problems) > 0 {
 		return nil, errors.New(strings.Join(problems, "; "))
