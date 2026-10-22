@@ -570,12 +570,15 @@ func removeReaction(ctx context.Context, db dbExecutor, id, userID, emoji string
 }
 
 // replyRecord is what a reply points at, read at the moment the reply is: the
-// reply's own id, and the original's id, sender, body and whether it was deleted.
+// reply's own id, and the original's id, sender, body, kind and whether it was deleted.
+// The kind is there so a quote can say WHAT it quotes: a tombstone keeps its kind, and a
+// picture or a card has little or no body to show.
 type replyRecord struct {
 	MessageID  string
 	OriginalID string
 	SenderID   string
 	Body       string
+	Kind       string
 	Deleted    bool
 }
 
@@ -583,9 +586,11 @@ type replyRecord struct {
 // It is read every time and never stored, so an edit of the original shows through.
 // The join insists the original is in the SAME conversation as the reply: the write
 // path already guarantees it, and checking again here means the preview cannot leak
-// a line from another thread even if some row were ever wrong.
+// a line from another thread even if some row were ever wrong. The kind is the
+// original's own column, tombstone or not: a delete clears the words and the payload
+// and keeps the kind, so a quote of a deleted picture still knows it was one.
 const replyPreviewsSQL = `
-SELECT m.id, r.id, r.sender_id, r.body, r.deleted_at IS NOT NULL
+SELECT m.id, r.id, r.sender_id, r.body, r.kind, r.deleted_at IS NOT NULL
 FROM messages m
 JOIN messages r ON r.id = m.reply_to_id
 WHERE m.id = ANY($1)
@@ -603,7 +608,7 @@ func loadReplies(ctx context.Context, db dbExecutor, messageIDs []string) (map[s
 	out := map[string]replyRecord{}
 	for rows.Next() {
 		var r replyRecord
-		if err := rows.Scan(&r.MessageID, &r.OriginalID, &r.SenderID, &r.Body, &r.Deleted); err != nil {
+		if err := rows.Scan(&r.MessageID, &r.OriginalID, &r.SenderID, &r.Body, &r.Kind, &r.Deleted); err != nil {
 			return nil, fmt.Errorf("scan reply: %w", err)
 		}
 		out[r.MessageID] = r

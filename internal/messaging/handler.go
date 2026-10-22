@@ -261,12 +261,19 @@ type messageResponse struct {
 
 // replyPreview is what a reply shows of the message it answers: resolved every time
 // the reply is read, never stored, so an edit of the original shows through. A
-// deleted original reports deleted with an empty body.
+// deleted original reports deleted with an empty body, and keeps its kind.
+//
+// Kind is the original's, from the same closed set as a message's and always present,
+// so a quote of a picture or a card can say what it is quoting instead of showing an
+// empty line. It is all the preview says of the original's payload: a quote has to know
+// WHAT it quotes and not how to draw it, and a width and height here would be the start
+// of a second copy of the message.
 type replyPreview struct {
 	ID       string `json:"id"`
 	SenderID string `json:"sender_id"`
 	Body     string `json:"body"`
 	Deleted  bool   `json:"deleted"`
+	Kind     string `json:"kind"`
 }
 
 // reactionSummary is one emoji on a message: how many people used it and whether
@@ -310,7 +317,7 @@ var partialMentionTail = regexp.MustCompile(`<(?:@[A-Za-z0-9]*)?$`)
 // that is short enough ends exactly as its author wrote it. A deleted original has no
 // words to show.
 func toReplyPreview(r replyRecord) replyPreview {
-	p := replyPreview{ID: r.OriginalID, SenderID: r.SenderID, Deleted: r.Deleted}
+	p := replyPreview{ID: r.OriginalID, SenderID: r.SenderID, Deleted: r.Deleted, Kind: r.Kind}
 	if !r.Deleted {
 		runes := []rune(r.Body)
 		if len(runes) > replyPreviewChars {

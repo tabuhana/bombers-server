@@ -556,7 +556,7 @@ func (d *fakeDB) query(sql string, args []any, inTx bool) (pgx.Rows, error) {
 			if r == nil || !inPair(*r, m.SenderID, m.RecipientID) {
 				continue
 			}
-			data = append(data, []any{m.ID, r.ID, r.SenderID, r.Body, r.DeletedAt != nil})
+			data = append(data, []any{m.ID, r.ID, r.SenderID, r.Body, r.Kind, r.DeletedAt != nil})
 		}
 		return &fakeRows{data: data}, nil
 
@@ -1925,6 +1925,7 @@ func TestSQLReplyPreviewIsReadAtReadTimeAndScopedToTheConversation(t *testing.T)
 		"(r.sender_id = m.sender_id AND r.recipient_id = m.recipient_id)",
 		"(r.sender_id = m.recipient_id AND r.recipient_id = m.sender_id)",
 		"r.deleted_at IS NOT NULL",
+		"r.body, r.kind, r.deleted_at",
 	)
 	// A deleted original is still joined: that is how it is reported deleted.
 	mustNotContain(t, "replyPreviewsSQL", replyPreviewsSQL, "r.deleted_at IS NULL")
@@ -2201,7 +2202,7 @@ func TestLoadRepliesOnlyResolvesWithinTheConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]replyRecord{"good": {MessageID: "good", OriginalID: "orig", SenderID: "b", Body: "the original"}}
+	want := map[string]replyRecord{"good": {MessageID: "good", OriginalID: "orig", SenderID: "b", Body: "the original", Kind: kindText}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("replies = %+v, want %+v", got, want)
 	}
