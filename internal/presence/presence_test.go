@@ -1,64 +1,40 @@
 package presence
 
-import (
-	"testing"
-	"time"
-)
+import "testing"
 
-// A stored status is a WISH; what a friend sees is that wish plus whether
-// anybody has heard from you. Everything else in this package is one query, so
-// this function is the whole of the domain's thinking.
-func TestEffectiveCombinesTheWishAndTheHeartbeat(t *testing.T) {
-	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
-	fresh := now.Add(-30 * time.Second)
-	stale := now.Add(-StaleAfter - time.Second)
-
+// A stored status is a WISH; what a friend sees is that wish plus whether an app
+// of theirs is connected. Everything else in this package is one query, so this
+// function is the whole of the domain's thinking.
+func TestEffectiveCombinesTheWishAndTheSocket(t *testing.T) {
 	cases := []struct {
-		name  string
-		state Status
-		seen  time.Time
-		want  Status
+		name      string
+		state     Status
+		connected bool
+		want      Status
 	}{
-		{"online and here", Online, fresh, Online},
-		{"away and here", Away, fresh, Away},
-		{"dnd and here", DND, fresh, DND},
+		{"online and here", Online, true, Online},
+		{"away and here", Away, true, Away},
+		{"dnd and here", DND, true, DND},
 
-		// An `online` from a machine that stopped talking is a claim nobody is
-		// backing. This is the case that matters: without it, closing the app
-		// leaves you permanently green.
-		{"online but long gone", Online, stale, Offline},
-		{"away but long gone", Away, stale, Offline},
-		{"dnd but long gone", DND, stale, Offline},
+		// The case that matters: a status stored by a machine that has since been
+		// shut. Without it, closing the app leaves you permanently green.
+		{"online but nothing connected", Online, false, Offline},
+		{"away but nothing connected", Away, false, Offline},
+		{"dnd but nothing connected", DND, false, Offline},
 
-		// Offline is honoured exactly — it means invisible AND disconnected, so
-		// a heartbeat arriving a second ago does not override it. Otherwise
-		// "appear offline" would leak the moment the app checked in.
-		{"offline despite a fresh heartbeat", Offline, fresh, Offline},
-		{"offline and gone", Offline, stale, Offline},
-
-		// Never seen at all: the zero time is what the friends query fills in
-		// for somebody with no presence row.
-		{"never seen", Online, time.Time{}, Offline},
+		// Offline is honoured exactly — it means invisible AND disconnected, so a
+		// live socket does not override it. Otherwise "appear offline" would leak
+		// the moment the app connected.
+		{"offline despite a live socket", Offline, true, Offline},
+		{"offline and gone", Offline, false, Offline},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := Effective(tc.state, tc.seen, now); got != tc.want {
-				t.Errorf("Effective(%q, %v) = %q, want %q", tc.state, tc.seen, got, tc.want)
+			if got := Effective(tc.state, tc.connected); got != tc.want {
+				t.Errorf("Effective(%q, %v) = %q, want %q", tc.state, tc.connected, got, tc.want)
 			}
 		})
-	}
-}
-
-// The boundary itself, since "3 minutes" is a number somebody will want to
-// change and the comparison is easy to get backwards.
-func TestStaleIsExclusive(t *testing.T) {
-	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
-	if got := Effective(Online, now.Add(-StaleAfter), now); got != Online {
-		t.Errorf("exactly at the limit = %q, want online — a heartbeat that just aged out is still a heartbeat", got)
-	}
-	if got := Effective(Online, now.Add(-StaleAfter-time.Nanosecond), now); got != Offline {
-		t.Errorf("a nanosecond past the limit = %q, want offline", got)
 	}
 }
 
@@ -75,4 +51,22 @@ func TestValidIsAClosedSet(t *testing.T) {
 			t.Errorf("Valid(%q) = true, want false", bad)
 		}
 	}
+}
+
+// The invisible rule, which is the one thing in the fan-out that is a promise
+// rather than a convenience: a frame saying "X's presence moved" says X is at
+// their computer, so an invisible user's socket arriving or going tells nobody.
+// Their CHOOSING invisible is still announced — that is the change, and all it
+// reveals is the grey dot they asked for.
+func TestAnnounceSaysNothingForAnInvisibleUser(t *testing.T) {
+	told := [][]string{}
+	h := &Handler{nudge: func(userIDs []string, fromID string) { told = append(told, userIDs) }}
+
+	h.Announce(nil, "u1", Offline)
+	if len(told) != 0 {
+		t.Fatalf("an invisible user's presence was announced to %v", told)
+	}
+	// Without a pool there is nothing to look friends up in, so the other
+	// statuses cannot be driven this far here; the gate above runs before any
+	// query, which is what this pins.
 }

@@ -458,7 +458,20 @@ func buildAndServe() (*app, error) {
 	activitiesHandler := activities.NewHandler(pool, storage)
 	packsHandler := packs.NewHandler(pool, storage)
 	releasesHandler := releases.NewHandler(pool, storage)
-	presenceHandler := presence.NewHandler(pool)
+	// Who is around is the nudge socket's answer, not a stored heartbeat: an app
+	// connecting and its last window closing are the two events, and presence turns
+	// each into one "look again" for that person's friends.
+	presenceHandler := presence.NewHandler(pool, notifyHub.ConnectedAmong, func(userIDs []string, fromID string) {
+		notifyHub.SendMany(userIDs, notify.KindPresence, map[string]string{"from": fromID})
+	})
+	// The hook runs on the socket's own goroutine, as it arrives and as it goes, so
+	// it gets a context of its own: the request's is already cancelled by the time a
+	// disconnect is announced.
+	notifyHub.OnPresence(func(userID string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		presenceHandler.Moved(ctx, userID)
+	})
 	tokensHandler := apitokens.NewHandler(pool)
 	// RequireAuth now accepts an API token as well as a session JWT. Wired here
 	// rather than imported by `auth`, so the dependency points one way.

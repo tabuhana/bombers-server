@@ -1,22 +1,29 @@
 // Package presence is who's around.
 //
-// It is deliberately the smallest thing that could work: one row per user, one
-// write to update it, one read to see your friends. No WebSocket, no fan-out, no
-// subscription — a heartbeat every minute from a few dozen people is nothing,
-// and the socket layer that would make this "live" doesn't exist yet. When it
-// does, this table is still the state; the socket only saves the polling.
+// One row per user, holding the status they CHOSE. Whether they are actually
+// THERE is not in the table and never was worth storing: it is whether an app of
+// theirs has a nudge socket open right now (internal/notify), which the server
+// learns the instant it happens.
+//
+// It used to be a one-minute heartbeat against a three-minute staleness window,
+// which meant a friend signing on took up to a minute to go green and closing
+// the app left them green for three. The socket is the same signal with none of
+// the lag: a connect and a disconnect are events, so this domain announces them
+// to the person's friends and nobody polls for them.
 //
 // The one idea worth keeping straight: a stored status is a WISH, not a fact.
-// What a friend actually sees is computed from the wish and the heartbeat
+// What a friend actually sees is computed from the wish and the connection
 // together, at read time, and never written down.
 package presence
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,27 +48,17 @@ func Valid(s string) bool {
 	return false
 }
 
-// StaleAfter is how long a heartbeat lasts before its owner counts as gone.
+// Effective is what a friend actually sees, from what you chose and whether an
+// app of yours is connected.
 //
-// Three minutes against a one-minute heartbeat, so a laptop that slept briefly,
-// a network that hiccuped, or a machine that was busy for a moment doesn't
-// flicker its owner offline. The cost of being generous is that someone who
-// closed the app looks present for up to three minutes; the cost of being tight
-// is that people flicker, which is worse — a presence dot nobody trusts is a
-// presence dot nobody reads.
-const StaleAfter = 3 * time.Minute
-
-// Effective is what a friend actually sees, from what you chose and when you
-// were last heard from.
-//
-// Offline is honoured exactly: it means invisible AND disconnected, so a fresh
-// heartbeat doesn't override it. Everything else expires — an `online` from a
-// machine that stopped talking three minutes ago is a claim nobody is backing.
-func Effective(status Status, updatedAt time.Time, now time.Time) Status {
+// Offline is honoured exactly: it means invisible AND disconnected, so a live
+// socket doesn't override it. Everything else needs the socket — an `online`
+// stored by a machine that has since been shut is a claim nobody is backing.
+func Effective(status Status, connected bool) Status {
 	if status == Offline {
 		return Offline
 	}
-	if now.Sub(updatedAt) > StaleAfter {
+	if !connected {
 		return Offline
 	}
 	return status
@@ -117,8 +114,10 @@ WHERE f.state = 'accepted'
   AND (f.user_a_id = $1 OR f.user_b_id = $1)
 `
 
-// Friends returns the caller's friends and their EFFECTIVE statuses.
-func Friends(ctx context.Context, pool *pgxpool.Pool, userID string, now time.Time) ([]Record, error) {
+// Friends returns the caller's friends and their EFFECTIVE statuses. `connected`
+// answers for the whole list in one pass (the hub's ConnectedAmong), so the read
+// is one query and one lock however many friends there are.
+func Friends(ctx context.Context, pool *pgxpool.Pool, userID string, connected func([]string) map[string]bool) ([]Record, error) {
 	rows, err := pool.Query(ctx, friendsSQL, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list friend presence: %w", err)
@@ -132,8 +131,64 @@ func Friends(ctx context.Context, pool *pgxpool.Pool, userID string, now time.Ti
 		if err := rows.Scan(&r.UserID, &status, &r.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan presence: %w", err)
 		}
-		r.Status = Effective(Status(status), r.UpdatedAt, now)
+		r.Status = Status(status)
 		out = append(out, r)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out))
+	for _, r := range out {
+		ids = append(ids, r.UserID)
+	}
+	here := map[string]bool{}
+	if connected != nil {
+		here = connected(ids)
+	}
+	for i := range out {
+		out[i].Status = Effective(out[i].Status, here[out[i].UserID])
+	}
+	return out, nil
+}
+
+// FriendIDs is who to tell when somebody arrives, leaves or picks a status: the
+// accepted friends, and nobody else. The same join as the read above with the
+// presence left off, because a fan-out wants ids and not statuses.
+const friendIDsSQL = `
+SELECT CASE WHEN f.user_a_id = $1 THEN f.user_b_id ELSE f.user_a_id END
+FROM friendships f
+WHERE f.state = 'accepted'
+  AND (f.user_a_id = $1 OR f.user_b_id = $1)
+`
+
+func FriendIDs(ctx context.Context, pool *pgxpool.Pool, userID string) ([]string, error) {
+	rows, err := pool.Query(ctx, friendIDsSQL, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list friend ids: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan friend id: %w", err)
+		}
+		out = append(out, id)
+	}
 	return out, rows.Err()
+}
+
+// Chosen is the status stored for one user, or Online when there is no row — the
+// same default a client starts at. Read when a socket arrives or goes, where the
+// wish is the half the hub cannot know.
+func Chosen(ctx context.Context, pool *pgxpool.Pool, userID string) (Status, error) {
+	var status string
+	err := pool.QueryRow(ctx, `SELECT status FROM presence WHERE user_id = $1`, userID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Online, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read chosen presence: %w", err)
+	}
+	return Status(status), nil
 }

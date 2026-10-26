@@ -95,6 +95,18 @@ const (
 	// STILL only a nudge: the server holds the invite and GET /invites lists it, so
 	// a frame that lands on no socket loses nothing.
 	KindInvite = "invite"
+	// KindPresence — a friend arrived or left: their app connected, their last
+	// window closed, or they chose a status. `d` carries {"from": "<their id>"} and
+	// NOT the status, although the hub is the one place that knows it — presence
+	// fans out to a whole friends list, which is the case the no-content rule is
+	// for, and "appear offline" is exactly the thing a frame addressed one friend
+	// too wide would give away. The client re-reads GET /presence, which applies
+	// the friend gate and the invisible rule.
+	//
+	// Sent to every accepted friend. Nothing is sent for an INVISIBLE user's
+	// socket arriving or going, because `{"from": X}` would say X is at their
+	// computer, which is the one thing they asked not to say.
+	KindPresence = "presence"
 )
 
 // sendQueue bounds one connection's backlog. These are tiny and infrequent, so
@@ -120,13 +132,38 @@ type conn struct {
 type Hub struct {
 	mu     sync.RWMutex
 	byUser map[string]map[*conn]struct{}
+	// Told when a user's FIRST socket arrives and when their LAST one goes — the
+	// two moments presence is made of. WHICH of the two is not passed: the hook's
+	// job is to say somebody's presence moved, and every reader answers that by
+	// asking the hub again, so a flag would be a second copy of an answer that is
+	// already one call away. Set once at wiring, read without a lock because
+	// nothing writes it after that.
+	onPresence func(userID string)
 }
 
 func NewHub() *Hub {
 	return &Hub{byUser: make(map[string]map[*conn]struct{})}
 }
 
-func (h *Hub) add(userID string, c *conn) {
+// OnPresence registers the hook. Called ONCE, during wiring, before anything can
+// connect: there is no lock around the field, because a hub whose hook changes
+// under a live connection is not a thing that should be possible.
+func (h *Hub) OnPresence(fn func(userID string)) { h.onPresence = fn }
+
+// announce runs the hook OUTSIDE the lock. It does real work — a friends query
+// and a fan-out back through this hub — so calling it under h.mu would deadlock
+// the moment it sent anything.
+func (h *Hub) announce(userID string) {
+	if h.onPresence == nil {
+		return
+	}
+	h.onPresence(userID)
+}
+
+// add registers a socket and reports whether it is this user's first: a second
+// window is not an arrival, and telling their friends about one would be a flap
+// nobody asked to see.
+func (h *Hub) add(userID string, c *conn) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	set := h.byUser[userID]
@@ -134,22 +171,31 @@ func (h *Hub) add(userID string, c *conn) {
 		set = make(map[*conn]struct{})
 		h.byUser[userID] = set
 	}
+	first := len(set) == 0
 	set[c] = struct{}{}
+	return first
 }
 
-func (h *Hub) remove(userID string, c *conn) {
+// remove deregisters a socket and reports whether it was this user's last — the
+// moment they are gone, and the only one worth announcing.
+func (h *Hub) remove(userID string, c *conn) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// A set is dropped the moment it empties (below), so a user with nothing open
+	// has no entry at all: that is what makes removing the same socket twice
+	// report one departure, with no need to check whether this one is held.
 	set := h.byUser[userID]
 	if set == nil {
-		return
+		return false
 	}
 	delete(set, c)
 	// Drop the empty set rather than leaving a key behind for every user who has
 	// ever signed in — this map outlives every connection in it.
 	if len(set) == 0 {
 		delete(h.byUser, userID)
+		return true
 	}
+	return false
 }
 
 // Send nudges one user on every socket they have open.
@@ -187,13 +233,32 @@ func (h *Hub) SendMany(userIDs []string, kind string, data any) {
 	}
 }
 
-// Listening reports whether a user has any socket open. Only for tests and the
-// console's status line — no behaviour should depend on it, because the answer
-// can change between asking and acting on it.
+// Listening reports whether a user has any socket open — which is to say
+// whether an app of theirs is running, now. `presence` reads it (through
+// ConnectedAmong) and that IS the behaviour: a dot is a statement about this
+// moment, and the answer going stale between asking and drawing is corrected by
+// the frame the change itself sends. It replaced a stored heartbeat, which could
+// only ever say "was running, within three minutes".
 func (h *Hub) Listening(userID string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.byUser[userID]) > 0
+}
+
+// ConnectedAmong answers for a list in one pass under one lock, because the
+// caller is a friends list and asking per id would be a lock acquisition each.
+// Ids with nothing open are ABSENT from the map rather than false, so a caller
+// that forgets to check reads "not connected" either way.
+func (h *Hub) ConnectedAmong(userIDs []string) map[string]bool {
+	out := make(map[string]bool, len(userIDs))
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, id := range userIDs {
+		if len(h.byUser[id]) > 0 {
+			out[id] = true
+		}
+	}
+	return out
 }
 
 // Count is how many sockets are open in total, for `status`.

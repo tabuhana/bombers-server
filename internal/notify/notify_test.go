@@ -151,3 +151,63 @@ func TestSendManyReachesEachUserOnce(t *testing.T) {
 		}
 	}
 }
+
+// ── presence: the socket IS the signal ──────────────────────────────────────
+
+// A first socket arriving and a last one going are the two moments somebody's
+// friends need to hear about. The ones in between are other windows of theirs,
+// and announcing one would flap a dot that never changed.
+func TestOnlyTheFirstAndLastSocketAnnounce(t *testing.T) {
+	h := NewHub()
+	moved := []string{}
+	h.OnPresence(func(userID string) { moved = append(moved, userID) })
+
+	a, b := newConn(), newConn()
+	if !h.add("u1", a) {
+		t.Fatal("the first socket did not report itself as first")
+	}
+	if h.add("u1", b) {
+		t.Error("a second window reported itself as an arrival")
+	}
+	if h.remove("u1", a) {
+		t.Error("closing one of two windows reported itself as a departure")
+	}
+	if !h.remove("u1", b) {
+		t.Error("the last socket did not report itself as last")
+	}
+	// Removing it twice must not announce again: a hub that double-counted a
+	// departure would tell a user's friends to re-read after they had gone.
+	if h.remove("u1", b) {
+		t.Error("removing the same socket twice reported a second departure")
+	}
+
+	h.announce("u1")
+	if len(moved) != 1 || moved[0] != "u1" {
+		t.Fatalf("the hook saw %v, want one u1", moved)
+	}
+}
+
+// Presence reads this for a whole friends list, so it answers in one pass. An id
+// with nothing open is ABSENT rather than false, so a caller that forgets to
+// check a missing key still reads "not connected".
+func TestConnectedAmongAnswersForAList(t *testing.T) {
+	h := NewHub()
+	h.add("here", newConn())
+	h.add("also", newConn())
+
+	got := h.ConnectedAmong([]string{"here", "gone", "also"})
+	if !got["here"] || !got["also"] {
+		t.Errorf("a connected user read as absent: %v", got)
+	}
+	if _, present := got["gone"]; present {
+		t.Errorf("somebody with no socket is in the map: %v", got)
+	}
+	if len(h.ConnectedAmong(nil)) != 0 {
+		t.Error("asking about nobody answered about somebody")
+	}
+}
+
+// A hub with no hook is how every test and every unwired build makes one.
+func TestAnnounceWithNoHookIsHarmless(t *testing.T) {
+	NewHub().announce("u1")
+}

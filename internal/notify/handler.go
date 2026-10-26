@@ -70,8 +70,17 @@ func (h *Handler) run(ctx context.Context, sock *websocket.Conn, userID string) 
 	defer cancel()
 
 	c := &conn{out: make(chan []byte, sendQueue)}
-	h.hub.add(userID, c)
-	defer h.hub.remove(userID, c)
+	// The socket IS the presence signal, so arriving and going are announced from
+	// here — instantly, and with no heartbeat to wait for. Only the first socket
+	// and the last one: the ones in between are other windows.
+	if h.hub.add(userID, c) {
+		h.hub.announce(userID)
+	}
+	defer func() {
+		if h.hub.remove(userID, c) {
+			h.hub.announce(userID)
+		}
+	}()
 
 	// The client sends nothing but its own keepalives. Reading is still
 	// necessary — it's how a closed connection is noticed — so a reader runs
