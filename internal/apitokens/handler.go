@@ -188,10 +188,6 @@ func (h *Handler) Scopes(w http.ResponseWriter, r *http.Request) {
 // permission nobody can read is a permission everybody grants.
 func describe(s Scope) string {
 	switch s {
-	case NotesRead:
-		return "Read the notes you've published to this server"
-	case NotesWrite:
-		return "Add and change notes on this server"
 	case PeopleRead:
 		return "Read the cards you keep about people"
 	case FriendsRead:

@@ -29,11 +29,11 @@ const (
 	// useless, and it exposes nothing the token holder doesn't already know.
 	ProfileRead Scope = "profile:read"
 
-	// NotesRead / NotesWrite cover published items — sync pull and push. This
-	// is the big one: your notes are the substance of the notebook, and an
-	// agent that only builds nodes has no business holding it.
-	NotesRead  Scope = "notes:read"
-	NotesWrite Scope = "notes:write"
+	// There is no notes scope. `notes:read`/`notes:write` covered the published
+	// items of the sync engine, which was deleted 2026-11-03 along with the
+	// routes they gated — a scope that opens no door is a permission screen
+	// lying to whoever reads it. A token already carrying one of those strings
+	// simply matches nothing; `Valid` refuses a new one.
 
 	// PeopleRead is the cards you keep about the people in your life: your own
 	// self-card's shares and the about-cards you've written. The most personal
@@ -75,8 +75,6 @@ func RequiresAdmin(s Scope) bool {
 var All = []Scope{
 	StoreRead,
 	StoreWrite,
-	NotesRead,
-	NotesWrite,
 	FriendsRead,
 	PeopleRead,
 	MessagesRead,

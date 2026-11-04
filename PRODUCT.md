@@ -30,7 +30,6 @@ A real backend that handles everything social and everything that must outlive a
 
 - **Accounts & auth** — you create an account on first launch.
 - **Friends** — friend-code based (Nintendo style), no public discovery.
-- **Published content** — local content syncs up to the server as a server-side copy. This is both your cross-device backup AND the thing that makes sharing possible.
 - **Sharing & permissions** — grant specific friends live read-access to specific published content.
 - **Messaging** — real-time DMs.
 - **Rooms** — ephemeral real-time spaces to chat, hang out, and play games.
@@ -66,45 +65,28 @@ Every server — official or private — is a **fully disconnected island**:
 
 For all build purposes: design for ONE server (one binary, one Postgres, one circle of users). "Multi-server" only ever means separate islands running the same code — don't over-engineer for federation or cross-server scenarios.
 
-## Mental model: local working copy + server published copy
+## Mental model: the notebook is local, the server is social
 
 The single most important concept. Internalize it.
 
-- **Local is your working copy.** Source of truth for editing. Always available offline. Where you actually write and track.
-- **Server is your published copy.** A synced-up mirror of everything *except* what you mark local-only. Two purposes at once:
-  1. **Cross-device backup / restore** — wipe your laptop, log in on a new machine, pull your published content back down.
-  2. **The sharing substrate** — anything on the server can be shared with friends. Nothing can be shared unless it's on the server.
+- **The notebook is the user's and it is on their machine.** Notes, moods,
+  events, todos, every node's data, the themes they made — all of it lives in
+  the data root. Nothing copies it anywhere.
+- **The server is the social half.** Accounts, friends, DMs, rooms, presence,
+  profiles and the facts on person cards, the store, release publishing, and the
+  signalling that lets two machines send each other a file. It will take on more
+  jobs over time — each one a thing decided and built, not a mirror of the
+  notebook that reappears.
+- **There is no backup** (2026-11-03). The publish/pull engine was deleted on
+  both halves. Lose the machine, lose the notebook — that is the honest state of
+  the app, and nothing may imply otherwise.
 
-"Published" does **not** mean public. It means "synced to your account on the server, where you *could* share it if you choose." By default nothing is shared with anyone.
+## Sharing model: facts, not documents
 
-### Publish rules
-
-- **Auto-publish by default.** New content is queued and synced to the server on the next sync.
-- **Local-only opt-out.** A global setting (default publish on/off) plus a per-note override. Anything marked local-only never leaves the device — and therefore can never be restored or shared. **The UI must clearly warn** that local-only content can't be restored or shared, at the moment the user marks it local-only.
-
-### Sync behavior (be honest about what this is)
-
-Sync is **triggered, not real-time mirroring.** The user understands this and it's fine.
-
-- Sync runs: on user request ("Sync now"), and automatically on app load if it's been a while since the last sync.
-- It is NOT live cross-device mirroring. Editing on your PC does not instantly appear on your laptop. You sync the PC (push), then sync the laptop (pull), and now they match.
-- The UI must always show **"last synced X ago"** so the user knows how fresh their state is before they rely on it — especially before restoring on a new machine.
-- Conflicts: same user owns both ends and edits are rarely simultaneous, so last-write-wins by `updated` timestamp is acceptable for v1. Flag conflicts to the user rather than silently clobbering when content has diverged. Details in `SERVER.md`.
-
-## Sharing model: friends view your live server copy
-
-When you share something with a friend, you grant them **live read-access to your server-side copy.** The server is authoritative for shared content.
-
-- They see your content as it currently is on the server. When you edit and re-sync, their view updates.
-- Revoke access and their window closes — they can no longer see it.
-- They are *viewing*, not *forking*. No independent copy by default.
-- **Optional "save a copy":** a friend can explicitly save shared content into their own vault to keep it permanently (survives you unsharing). Deliberate action, not the default. A saved copy becomes their content — their working copy, published to *their* account.
-
-"Live" here means **as-of-last-sync live** (consistent with the sync model) — not sub-second realtime. Only **messaging and rooms** are true realtime.
-
-This applies uniformly: shared note → friend sees your current published note; shared mood calendar → friend sees your mood as you log it; shared event → lands on friend's calendar.
-
-**Exception — photos/memories copy instead of live-view.** Photos are local-first and heavy. Sharing a photo/album pushes a copy to the friend (temporary pass-through on the server, deleted after delivery) so "memories of each other" can live in both vaults. This is the one place the copy model beats live-view — you both want to *keep* the memory.
+What a friend can see is what has deliberately been put on the social half: the
+profile and its facts, what is said in DMs and rooms, what a node puts in front
+of named friends, and what is published to the store. Notes are not shared
+(removed 2026-09-14) and there is no server copy of a vault to grant access to.
 
 ## The pillars
 
@@ -140,7 +122,7 @@ So a profile for, say, your girlfriend shows: the private notes you keep about h
 
 - Log your mood over time (a mood calendar/history).
 - Grant specific friends live view-access ("share how I've been feeling with my girlfriend").
-- They see it update as you log, as-of-last-sync.
+- Sharing a mood calendar is not built: there is no server copy of it to grant.
 
 ### 6. Habit tracking
 
@@ -156,7 +138,7 @@ So a profile for, say, your girlfriend shows: the private notes you keep about h
 ### 8. Messaging
 
 - Real-time DMs with friends (server-mediated, WebSocket).
-- Genuinely live, unlike content sync.
+- Genuinely live — messaging and rooms are the only realtime surfaces.
 
 ### 9. Rooms
 
@@ -190,10 +172,10 @@ This is a **re-scope, not a restart.** The notebook is the foundation and stays.
 ## What survives / changes / is cut
 
 - **Keep:** the entire notebook foundation — vault model, Markdown files on disk, editor, rendering, links/graph, search, tags, templates, revisions, themes, plugin system, local-first editing.
-- **Refactor:** the vault now syncs a *published copy* to the server. Add the publish/local-only concept. Add account/auth on launch. Replace any "anonymous backup daemon" notion with account-based sync to the Bombers server.
+- **Refactor:** add account/auth on launch. (The *published copy* and publish/local-only concepts were built and then deleted on 2026-11-03 — see §Mental model.)
 - **Add (new):** accounts/auth, friends + friend codes, profiles + profile cards, events, mood, habits, memories, messaging, rooms — and the entire Go server.
 - **Cut:**
-  - The standalone **sync daemon** concept (`SYNC_DAEMON.md` is obsolete — delete it). Sync is now a feature of the client talking to the authenticated server.
+  - The standalone **sync daemon** concept (`SYNC_DAEMON.md` is obsolete — delete it), and with it, since 2026-11-03, sync itself.
   - The **`VaultStorage` abstraction** (never needed).
   - The **static-site publisher** sibling project (no web viewer; the server handles sharing; a static generator no longer fits the product).
   - **MCP server / AI panel** — parked indefinitely in the backlog. Not part of the current product. Don't build it; don't ask about it.

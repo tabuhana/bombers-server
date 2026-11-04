@@ -115,29 +115,30 @@ Note the asymmetry: **DMs persist, rooms don't.** DM history is retained **indef
 - Access token on every HTTP request (`Authorization: Bearer`) and on WebSocket connect.
 - **Discord OAuth — wanted, not yet built.** The owner asked for sign-in with Discord and linking a Discord account (2026-08-06). **Google is dropped** — it was only ever listed alongside Discord and nobody wants it. Undecided, and it changes a lot: whether Discord *replaces* username+password or sits beside it. If it replaces it, password reset — which does not exist in any form today — stops being a problem that needs solving.
 
-## Sync / publish contract (the heart of client↔server)
+## There is no sync, and no sharing of what you write
 
-This is the most important contract to get right. High-level shape:
+**Deleted 2026-11-03.** `internal/sync/` — `POST /sync/push`, `GET /sync/pull`,
+`GET /sync/status` — is gone, along with the client half that called it. The
+notebook lives on the user's machine and is copied nowhere; there is no backup
+and no "last synced".
 
-- **Push (publish):** client sends its published items (those without `publish:false`) — id (ULID), content, `updated` timestamp, type. Server upserts by id, keeping the latest by `updated`.
-- **Pull (restore / refresh):** client asks for everything in its account (optionally "changed since T"). Server returns items; client writes them into the local vault. Used for new-machine restore and load-after-a-while refresh.
-- **Triggered, not streamed:** sync is a request/response operation the client initiates. Not a live mirror. Server records and returns a per-account "last synced" so the client can show "last synced X ago."
-- **Push triggers (when a push fires):** on explicit "Sync now", on app-load-after-a-while, and — **debounced-autosync** — after the user pauses editing for a few seconds (the same debounce the client already uses for saves/revisions). This is a *trigger*, not a new sync mode: push is push, and the server doesn't care why one fired. It makes the push side feel continuous (Google-Drive-ish) and keeps "last synced" fresh, but **it does not change the pull model** — the *other* device still only sees changes on its next pull. Bombers is still triggered sync, not live cross-device mirroring (per `PRODUCT.md`). A side benefit: more frequent pushes mean smaller divergence windows, so conflicts get *less* likely, not more.
-- **Conflicts:** last-write-wins by `updated` for v1, but the server should detect divergence (same id, both sides changed since last common sync) and return a conflict marker so the client can warn the user rather than silently clobber. Exact mechanism is a planning topic.
-- **Nudge-based auto-pull (the "feels live" layer):** the server sends a lightweight **"item X changed" nudge** down the client's existing WebSocket (the same socket used for messages/presence/indicators — no new infrastructure). On receiving a nudge, the client **auto-pulls that item in the background** so other devices stay fresh within ~a second of a push, without the user manually syncing. **Critical safety rule: the client must NOT auto-pull a note the user is currently editing** (a note open/focused in a pane). Background notes refresh silently; the actively-edited note is left alone and only reconciled through the normal conflict path. This deliberately stops short of full live mirroring — it gives the *feel* of cross-device liveness for everything you're not touching, while never clobbering in-progress edits out from under the user. Last-write-wins stays safe precisely because the one note that could collide is excluded from auto-pull. (Auto-pull is still a *pull*; the pull model is unchanged, just triggered by a nudge instead of a manual action.)
-- **Deletes:** soft-delete propagation — a note trashed on the client should mark the published item deleted on the server (so it doesn't resurrect on the next pull to another device).
+What that means for anyone designing here:
 
-A clean way to frame it: the server is a **versioned key-value store of published items, keyed by ULID, scoped to an account,** plus a sharing/permission layer on top. Keep that framing in mind.
+- **The server never holds what a user wrote.** Not notes, not a node's data,
+  not a mood. If a feature needs that on the server, it is a new feature with a
+  name, designed out loud — not a provider wired back into the client's boot.
+- **The sharing contract below was built on the server copy** and so describes
+  nothing that exists. What friends actually see of each other is the profile
+  and its facts (`profiles/`, `profile_shares`), DMs and rooms (`messaging/`,
+  `rooms/`), and what a node puts in front of named friends (`noderecords/`) —
+  each a domain that owns its own rows, none of them a mirror of a vault.
+- **The `published_items` and `sync_state` tables still exist.** Nothing reads
+  or writes them; dropping them is a deliberate act with a migration of its own,
+  not a side effect of this deletion.
+- `notes:read` / `notes:write` were removed from the API-token scopes with the
+  routes they gated.
 
-## Sharing contract
-
-- A user grants a friend `read` on a specific published item → creates a Share.
-- The friend's client, on sync, receives items shared *with* them (read-only), alongside their own.
-- Friend sees the owner's current server copy; updates appear on the friend's next sync (as-of-last-sync "live").
-- Revoking deletes the Share; the item no longer appears in the friend's pulls.
-- **Save-a-copy:** an explicit client action where the friend duplicates a shared item into their own vault as a new item (new ULID, owned by them, published to their account). Server just sees a normal new item from that user.
-- **No photo/media sharing in v1.** Photo libraries and any image sharing wait for the S3 phase (see below). The sharing contract above covers text/metadata items only for now.
-- **Note attachments are local, not server-synced yet.** Pasting an image into a note stores it as a file in the vault's `attachments/` folder and links to it (client notes concern — works offline, on disk, today). When such a note is published, only its **text** rides to the server in v1; syncing the referenced **image bytes** across devices is part of the S3 phase. So the sync contract does not pretend to move image binaries before then — a published note may reference an attachment that other devices can't yet pull.
+## Sharing contract (historical — built on the deleted server copy)
 
 ## Real-time contract (messages, rooms, presence, indicators)
 
@@ -180,7 +181,6 @@ The contract will be split into HTTP (request/response) and WebSocket (real-time
 **HTTP**
 - Auth: register, login, refresh, logout.
 - Friends: get my friend code, send friend request (by code), list/accept/reject requests, list friends, remove/block.
-- Sync: push published items, pull items (mine + shared-with-me), report last-synced.
 - Nodes: list catalog, download a node bundle, publish a node. **(Built — see "Node store".)**
 - Sharing: grant share, revoke share, list shares.
 - Profiles: CRUD about-cards, CRUD self-cards + visibility, fetch a friend's profile (resolves what they've made visible to me).
@@ -204,7 +204,6 @@ bombers-server/
 │   ├── auth/                  tokens, sessions, middleware
 │   ├── users/                 accounts, friend codes
 │   ├── friends/               friend graph, requests
-│   ├── sync/                  publish/pull, versioning, conflicts
 │   ├── nodes/                 node store: catalog, bundle download, publish
 │   ├── sharing/               shares, permission checks
 │   ├── profiles/              about-cards + self-cards + visibility
@@ -226,10 +225,9 @@ Each `internal/<domain>` package owns its own routes, logic, and queries — kep
 These are settled — build to them, don't re-litigate:
 
 1. **Auth:** unique username + password for v1. Short access token (~15 min) + long **rotating** refresh token. Desktop effectively never logs out (rotation); web/other consumers get real expiration. Tokens in secure OS storage. Discord OAuth is wanted and unbuilt; Google is dropped. (See "Auth model".)
-2. **Published content storage:** note bodies in **Postgres**. Heavy blobs are NOT a v1 concern — they wait for the S3 phase. (See "Tech stack".)
+2. ~~**Published content storage**~~ — note bodies were stored in Postgres; deleted 2026-11-03. The notebook is local.
 3. **DM retention:** **forever**, in Postgres (text). A picture persists like text, until its message is deleted.
-4. **Sync trigger:** debounced-autosync (push after an editing pause) is a trigger, not a new mode.
-5. **Cross-device auto-update:** server nudges over the existing WebSocket; client **auto-pulls in the background**, EXCEPT the note the user is actively editing (never auto-pulled, to keep last-write-wins safe). Feels live without full mirroring. (See "Sync / publish contract".)
+4. ~~**Sync trigger**~~ / ~~**Cross-device auto-update**~~ — both deleted 2026-11-03 with the sync domain itself. Nothing a user writes reaches the server.
 6. **Profile-card shape:** structured base fields (name, birthday, country, time zone; **age derived from birthday, not stored**) + freeform text. (See data model.)
 7. **Media arrives as slices of one S3 phase:** the phase has started — **profile media (avatar/banner) is built** on S3-compatible object storage (MinIO locally; MinIO-on-VPS or R2 in prod). Photo libraries, note-attachment sync, and room files are later slices (DM pictures are built) on the same plumbing. Note image-paste is local-vault-only until its slice.
 8. **Rate limiting:** standard **floor** — enough to keep the server from being knocked over (token-bucket on auth endpoints to stop brute-force; looser limits elsewhere). Not precision-tuned; friends-and-family scale.

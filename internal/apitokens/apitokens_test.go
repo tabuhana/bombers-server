@@ -70,14 +70,14 @@ func TestScopeSetDefaults(t *testing.T) {
 		}
 	}
 
-	granted := NewSet([]string{string(NotesRead), string(StoreRead)})
-	if !granted.Has(NotesRead) || !granted.Has(StoreRead) {
+	granted := NewSet([]string{string(MessagesRead), string(StoreRead)})
+	if !granted.Has(MessagesRead) || !granted.Has(StoreRead) {
 		t.Error("a granted scope is missing")
 	}
-	if granted.Has(NotesWrite) {
-		t.Error("notes:read leaked into notes:write — read must not imply write")
+	if granted.Has(MessagesWrite) {
+		t.Error("messages:read leaked into messages:write — read must not imply write")
 	}
-	if granted.Has(MessagesRead) {
+	if granted.Has(PeopleRead) {
 		t.Error("an unrelated scope came along")
 	}
 }
@@ -88,7 +88,7 @@ func TestValidRejectsInvented(t *testing.T) {
 			t.Errorf("%s should be valid", s)
 		}
 	}
-	for _, bad := range []string{"", "notes", "notes:*", "*", "admin", "notes:read ", "NOTES:READ"} {
+	for _, bad := range []string{"", "messages", "messages:*", "*", "admin", "notes:read", "MESSAGES:READ"} {
 		if Valid(bad) {
 			t.Errorf("%q should be refused", bad)
 		}
@@ -114,7 +114,7 @@ func TestRequireScope(t *testing.T) {
 		{
 			name: "a token holding the scope passes",
 			ctx: func(c context.Context) context.Context {
-				return WithHolder(c, Holder{UserID: "u1", Scopes: NewSet([]string{string(NotesRead)})})
+				return WithHolder(c, Holder{UserID: "u1", Scopes: NewSet([]string{string(MessagesRead)})})
 			},
 			want:    http.StatusOK,
 			reaches: true,
@@ -138,7 +138,7 @@ func TestRequireScope(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reached := false
-			h := RequireScope(NotesRead)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			h := RequireScope(MessagesRead)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				reached = true
 				w.WriteHeader(http.StatusOK)
 			}))

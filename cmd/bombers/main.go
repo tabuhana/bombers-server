@@ -51,7 +51,6 @@ import (
 	"github.com/tabuhana/bombers-server/internal/setup"
 	"github.com/tabuhana/bombers-server/internal/store"
 	"github.com/tabuhana/bombers-server/internal/svc"
-	"github.com/tabuhana/bombers-server/internal/sync"
 	"github.com/tabuhana/bombers-server/internal/transfers"
 	"github.com/tabuhana/bombers-server/internal/users"
 )
@@ -441,7 +440,6 @@ func buildAndServe() (*app, error) {
 		}
 		return nil, fmt.Errorf("ICE_STUN_URLS: %w", err)
 	}
-	syncHandler := sync.NewHandler(pool)
 	nodesHandler := nodes.NewHandler(pool)
 	nodeshareHandler := nodeshare.NewHandler(pool)
 	// The people axis: a record and its answers. The nudge names the NODE as
@@ -535,17 +533,6 @@ func buildAndServe() (*app, error) {
 			// current, which is nearly every call it ever makes.
 			r.Get("/releases/latest", releasesHandler.Latest)
 			r.Get("/releases/{version}/download", releasesHandler.Download)
-		})
-		// Token scope: writing published items.
-		r.Group(func(r chi.Router) {
-			r.Use(apitokens.RequireScope(apitokens.NotesWrite))
-			r.Post("/sync/push", syncHandler.Push)
-		})
-		// Token scope: your published items.
-		r.Group(func(r chi.Router) {
-			r.Use(apitokens.RequireScope(apitokens.NotesRead))
-			r.Get("/sync/pull", syncHandler.Pull)
-			r.Get("/sync/status", syncHandler.Status)
 		})
 		// Token scope: sending as you — the one action with a social consequence.
 		r.Group(func(r chi.Router) {
