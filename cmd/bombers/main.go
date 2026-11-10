@@ -440,7 +440,10 @@ func buildAndServe() (*app, error) {
 		}
 		return nil, fmt.Errorf("ICE_STUN_URLS: %w", err)
 	}
-	nodesHandler := nodes.NewHandler(pool)
+	// A node ships assets now (an app's `art` icon), so this store needs the
+	// object store a game's art has always used — same bucket, same
+	// authenticated pass-through, only the key namespace differs.
+	nodesHandler := nodes.NewHandler(pool, storage)
 	nodeshareHandler := nodeshare.NewHandler(pool)
 	// The people axis: a record and its answers. The nudge names the NODE as
 	// well as the writer, since the client has to wake one node and not all of
@@ -521,6 +524,7 @@ func buildAndServe() (*app, error) {
 			r.Use(apitokens.RequireScope(apitokens.StoreRead))
 			r.Get("/nodes", nodesHandler.List)
 			r.Get("/nodes/{id}/bundle", nodesHandler.Download)
+			r.Get("/nodes/{id}/assets/*", nodesHandler.Asset)
 			r.Get("/activities", activitiesHandler.List)
 			r.Get("/activities/{id}/bundle", activitiesHandler.Download)
 			r.Get("/activities/{id}/assets/*", activitiesHandler.Asset)
