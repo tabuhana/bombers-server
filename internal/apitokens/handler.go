@@ -197,7 +197,7 @@ func describe(s Scope) string {
 	case MessagesWrite:
 		return "Send, edit and delete direct messages as you, pin messages and react to them, and show friends when you're typing or have read their messages"
 	case StoreRead:
-		return "Browse and download this server's nodes, packs and games"
+		return "Browse and download this server's apps, nodes, packs and games"
 	case StoreWrite:
 		return "Publish to this server's stores (still requires an admin account)"
 	default:

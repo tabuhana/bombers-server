@@ -29,6 +29,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/activities"
 	"github.com/tabuhana/bombers-server/internal/admin"
 	"github.com/tabuhana/bombers-server/internal/apitokens"
+	"github.com/tabuhana/bombers-server/internal/apps"
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/console"
@@ -444,6 +445,12 @@ func buildAndServe() (*app, error) {
 	// object store a game's art has always used — same bucket, same
 	// authenticated pass-through, only the key namespace differs.
 	nodesHandler := nodes.NewHandler(pool, storage)
+	// THE APP STORE, which is what the node store is becoming. Both are live at
+	// once on purpose: what a user has installed today arrived as a node, and
+	// `/nodes` keeps serving them until nothing needs it. Two tables, so an id
+	// may exist in both and mean two different things, and two object-key
+	// prefixes, so their art cannot collide either.
+	appsHandler := apps.NewHandler(pool, storage)
 	nodeshareHandler := nodeshare.NewHandler(pool)
 	// The people axis: a record and its answers. The nudge names the NODE as
 	// well as the writer, since the client has to wake one node and not all of
@@ -522,6 +529,9 @@ func buildAndServe() (*app, error) {
 		// Token scope: browsing and downloading this server's shelves.
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreRead))
+			r.Get("/apps", appsHandler.List)
+			r.Get("/apps/{id}/bundle", appsHandler.Download)
+			r.Get("/apps/{id}/assets/*", appsHandler.Asset)
 			r.Get("/nodes", nodesHandler.List)
 			r.Get("/nodes/{id}/bundle", nodesHandler.Download)
 			r.Get("/nodes/{id}/assets/*", nodesHandler.Asset)
@@ -627,6 +637,13 @@ func buildAndServe() (*app, error) {
 		// than 404. So the bundle landed, the art did not, and the store served
 		// a node whose manifest named `icon.svg` with no such file behind it.
 		// A missing route reads as a working one until a verb is tried.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
+			r.Use(admin.RequireAdmin(pool))
+			r.Post("/apps", appsHandler.Publish)
+			r.Put("/apps/{id}/assets/*", appsHandler.PublishAsset)
+			r.Delete("/apps/{id}", appsHandler.Unpublish)
+		})
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))

@@ -77,7 +77,7 @@ func TestAssetRoutesCoverEveryStoreThatHasArt(t *testing.T) {
 		t.Fatalf("read main.go: %v", err)
 	}
 	got := sortedKeys(routeStores(string(source), `r\.Get\("/([a-z-]+)/\{id\}/assets/\*"`))
-	want := []string{"activities", "nodes", "packs"}
+	want := []string{"activities", "apps", "nodes", "packs"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("stores serving assets = %v, want %v", got, want)
 	}

@@ -49,7 +49,7 @@ const (
 	MessagesRead  Scope = "messages:read"
 	MessagesWrite Scope = "messages:write"
 
-	// StoreRead browses this server's nodes, packs and activities, and
+	// StoreRead browses this server's apps, nodes, packs and activities, and
 	// downloads them. Harmless enough that a build agent can hold it alone.
 	StoreRead Scope = "store:read"
 
