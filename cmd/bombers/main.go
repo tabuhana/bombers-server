@@ -617,11 +617,21 @@ func buildAndServe() (*app, error) {
 		// user browses + installs; PUBLISHING is admin-only (below).
 		// Admin-only store curation — the console's publish/unpublish reached
 		// over HTTP, so an operator can publish from the client. Its own
-		// sub-router so RequireAdmin gates ONLY these two routes.
+		// sub-router so RequireAdmin gates ONLY these three routes.
+		//
+		// THE ASSET PUT WAS WRITTEN AND NEVER WIRED, and that cost the first
+		// six nodes their icons (2026-11-10). `Handler.PublishAsset` existed,
+		// `node_assets` existed, the client uploaded — and every upload came
+		// back `405`, because chi answers a method nobody registered on a path
+		// that IS registered (the GET below it) with Method Not Allowed rather
+		// than 404. So the bundle landed, the art did not, and the store served
+		// a node whose manifest named `icon.svg` with no such file behind it.
+		// A missing route reads as a working one until a verb is tried.
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
 			r.Post("/nodes", nodesHandler.Publish)
+			r.Put("/nodes/{id}/assets/*", nodesHandler.PublishAsset)
 			r.Delete("/nodes/{id}", nodesHandler.Unpublish)
 		})
 		// Friend node-sharing (the clone model): a one-way transfer inbox,
