@@ -30,8 +30,10 @@ const (
 	TypeUpdate  = "room:update"  // broadcast: the name, the game the lobby is set to play, or member_invites changed
 	TypeKicked  = "room:kicked"  // sent to one member: the host removed you
 	TypeMoved   = "room:moved"   // sent to one member: you entered another room, so you left this one
-	TypeClosed  = "room:closed"  // broadcast: the room has ended, for everyone
-	TypeError   = "room:error"   // sent to one member: something was refused
+	// TypeReplaced is sent to one member's OLD connection: this room was opened again from another connection of yours
+	TypeReplaced = "room:replaced" // {room}
+	TypeClosed   = "room:closed"   // broadcast: the room has ended, for everyone
+	TypeError    = "room:error"    // sent to one member: something was refused
 )
 
 // Requests a CLIENT may make of the room itself, as opposed to messages it wants
@@ -473,11 +475,17 @@ func (r *Room) Close() {
 // Join adds (or REPLACES) a member's connection and announces them. Replacing is
 // deliberate: a reconnect from the same account takes over its slot instead of
 // creating a ghost, which is what makes a flaky connection survivable.
+//
+// The connection that was replaced is told `room:replaced` {room} and then closed
+// with 1008 (CloseFinal), so it ends instead of lingering until its socket dies by
+// itself. 1008 and not a plain close because the desktop client reconnects on any
+// close but that one: two devices of one account in this room would otherwise take
+// it from each other for ever. The same connection joining twice closes nothing.
 func (r *Room) Join(userID, username string, conn Sender) (*Member, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if r.closed {
+		r.mu.Unlock()
 		return nil, ErrRoomClosed
 	}
 
@@ -505,6 +513,20 @@ func (r *Room) Join(userID, username string, conn Sender) (*Member, error) {
 			"host":   r.HostID,
 		}, userID)
 	}
+
+	// Tell the replaced connection why, while the lock is held (Send never
+	// blocks); close it after the lock is released, as Kick does.
+	replaced := rejoining && existing.conn != conn
+	if replaced {
+		if frame, err := encodeControl(TypeReplaced, map[string]any{"room": r.ID}); err == nil {
+			existing.conn.Send(frame)
+		}
+	}
+	r.mu.Unlock()
+
+	if replaced {
+		existing.conn.CloseFinal("You opened this room somewhere else.")
+	}
 	return m, nil
 }
 
@@ -519,16 +541,24 @@ type LeaveOutcome struct {
 	HostGone bool
 }
 
-// Leave removes a member and announces the departure.
+// Leave removes a member and announces the departure, but only when `conn` is the
+// connection the room holds for them.
+//
+// It takes the connection because a person can have more than one: a rejoin
+// replaces the connection (see Join), and the replaced one's socket ends later.
+// Removing by id alone would let that late end remove the person who is now
+// connected on the new socket, announce them gone, and start a host's countdown.
+// A connection that is not the member's current one (replaced, or never a member)
+// changes nothing: no removal, no broadcast, no hostAway, no emptySince.
 //
 // The host seat never moves. A room belongs to whoever opened it, and a
 // temporary space that outlives its owner — quietly re-homed to whoever
 // happened to be standing there longest — was a worse answer than ending it.
-func (r *Room) Leave(userID string, now time.Time) LeaveOutcome {
+func (r *Room) Leave(userID string, conn Sender, now time.Time) LeaveOutcome {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.members[userID]; !ok {
+	if m, ok := r.members[userID]; !ok || m.conn != conn {
 		return LeaveOutcome{Empty: len(r.members) == 0}
 	}
 	r.removeLocked(userID)

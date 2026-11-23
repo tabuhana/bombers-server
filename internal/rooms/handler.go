@@ -331,7 +331,7 @@ func (h *Handler) runMember(ctx context.Context, conn *websocket.Conn, room *Roo
 		return
 	}
 	defer func() {
-		outcome := room.Leave(claims.UserID, time.Now())
+		outcome := room.Leave(claims.UserID, sender, time.Now())
 		if outcome.Empty {
 			logx.Info("rooms: %s is now empty", room.ID)
 		}

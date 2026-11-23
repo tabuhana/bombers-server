@@ -252,11 +252,12 @@ func TestKickRefusals(t *testing.T) {
 // The whistle never changes hands. A room is the host's space.
 func TestHostSeatNeverTransfers(t *testing.T) {
 	_, room, now := newTestRoom()
-	_, _ = room.Join("host", "h", &fakeConn{})
+	hostConn := &fakeConn{}
+	_, _ = room.Join("host", "h", hostConn)
 	second := &fakeConn{}
 	_, _ = room.Join("second", "s", second)
 
-	outcome := room.Leave("host", now)
+	outcome := room.Leave("host", hostConn, now)
 	if !outcome.HostGone {
 		t.Error("leaving as host should report it")
 	}
@@ -279,10 +280,11 @@ func TestHostSeatNeverTransfers(t *testing.T) {
 // countdown to closing it is cancelled.
 func TestHostCanReturnWithinTheGrace(t *testing.T) {
 	hub, room, now := newTestRoom()
-	_, _ = room.Join("host", "h", &fakeConn{})
+	hostConn := &fakeConn{}
+	_, _ = room.Join("host", "h", hostConn)
 	_, _ = room.Join("guest", "g", &fakeConn{})
 
-	room.Leave("host", now)
+	room.Leave("host", hostConn, now)
 	if n := hub.Reap(now.Add(30*time.Second), time.Minute); n != 0 {
 		t.Fatalf("room closed inside the grace window (%d)", n)
 	}
@@ -302,11 +304,12 @@ func TestHostCanReturnWithinTheGrace(t *testing.T) {
 // are told rather than left staring at a dead lobby.
 func TestHostGoneTooLongClosesTheRoom(t *testing.T) {
 	hub, room, now := newTestRoom()
-	_, _ = room.Join("host", "h", &fakeConn{})
+	hostConn := &fakeConn{}
+	_, _ = room.Join("host", "h", hostConn)
 	guest := &fakeConn{}
 	_, _ = room.Join("guest", "g", guest)
 
-	room.Leave("host", now)
+	room.Leave("host", hostConn, now)
 	if n := hub.Reap(now.Add(2*time.Minute), time.Minute); n != 1 {
 		t.Fatalf("an absent host past the grace should end the room, reaped %d", n)
 	}
@@ -400,6 +403,84 @@ func TestRejoinReplacesTheConnection(t *testing.T) {
 	if old.count("ping") != 0 {
 		t.Error("the replaced connection should be forgotten")
 	}
+
+	// The replaced connection is told why, by a typed frame, and closed for good.
+	if old.count(TypeReplaced) != 1 {
+		t.Fatalf("the old connection should get room:replaced once, got %v", old.types())
+	}
+	if got := old.last(TypeReplaced)["room"]; got != room.ID {
+		t.Errorf("room:replaced should name the room %q, got %v", room.ID, got)
+	}
+	if !old.closed || old.finalReason == "" {
+		t.Errorf("the old connection should be closed final, closed=%v reason=%q", old.closed, old.finalReason)
+	}
+	if fresh.count(TypeReplaced) != 0 || fresh.closed || fresh.finalReason != "" {
+		t.Errorf("the new connection must be left alone: %v closed=%v", fresh.types(), fresh.closed)
+	}
+}
+
+// The connection that was replaced ends later, by itself. That must remove nobody:
+// the guest is connected on the new socket.
+func TestReplacedConnectionLeavingLateRemovesNobody(t *testing.T) {
+	_, room, now := newTestRoom()
+	host := &fakeConn{}
+	_, _ = room.Join("host", "h", host)
+	old, fresh := &fakeConn{}, &fakeConn{}
+	_, _ = room.Join("guest", "g", old)
+	_, _ = room.Join("guest", "g", fresh)
+
+	room.Leave("guest", old, now)
+
+	found := false
+	for _, m := range room.Members() {
+		if m.UserID == "guest" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the guest is connected on the new socket and must still be a member")
+	}
+	if host.count(TypeLeave) != 0 {
+		t.Errorf("nobody left, but the host saw %v", host.types())
+	}
+	if !room.Relay("guest", []byte(`{"t":"ping"}`), now) {
+		t.Error("the guest's messages must still be relayed")
+	}
+	if host.count("ping") != 1 {
+		t.Errorf("the host should receive the guest's message, got %v", host.types())
+	}
+}
+
+// The same stale Leave, for the host, must not start the countdown that ends the
+// room while the host is sitting in it.
+func TestHostsReplacedConnectionDoesNotStartTheCountdown(t *testing.T) {
+	hub, room, now := newTestRoom()
+	old, fresh := &fakeConn{}, &fakeConn{}
+	_, _ = room.Join("host", "h", old)
+	_, _ = room.Join("host", "h", fresh)
+
+	outcome := room.Leave("host", old, now)
+	if outcome.HostGone {
+		t.Error("a replaced connection leaving is not the host going")
+	}
+	grace := time.Minute
+	if n := hub.Reap(now.Add(grace+time.Second), grace); n != 0 || room.Closed() {
+		t.Errorf("the room must stay open while the host is connected (reaped %d)", n)
+	}
+}
+
+// Joining twice on the same connection is not a replacement: it must not close
+// itself or tell itself it was replaced.
+func TestSameConnectionJoiningTwiceIsNotReplaced(t *testing.T) {
+	_, room, _ := newTestRoom()
+	conn := &fakeConn{}
+	_, _ = room.Join("guest", "g", conn)
+	if _, err := room.Join("guest", "g", conn); err != nil {
+		t.Fatal(err)
+	}
+	if conn.closed || conn.finalReason != "" || conn.count(TypeReplaced) != 0 {
+		t.Errorf("the same connection must not be closed or replaced: %v closed=%v", conn.types(), conn.closed)
+	}
 }
 
 // The cap exists so one broken client can't flood a room; it must NOT be so
@@ -443,14 +524,15 @@ func TestRateLimit(t *testing.T) {
 
 func TestReaperOnlyDropsRoomsEmptyPastTheGrace(t *testing.T) {
 	hub, room, now := newTestRoom()
-	_, _ = room.Join("host", "h", &fakeConn{})
+	hostConn := &fakeConn{}
+	_, _ = room.Join("host", "h", hostConn)
 
 	// Occupied rooms are never reaped, however long they sit.
 	if n := hub.Reap(now.Add(time.Hour), time.Minute); n != 0 {
 		t.Errorf("an occupied room was reaped (%d)", n)
 	}
 
-	room.Leave("host", now)
+	room.Leave("host", hostConn, now)
 	// Inside the grace window a reconnect is still possible - keep it.
 	if n := hub.Reap(now.Add(30*time.Second), time.Minute); n != 0 {
 		t.Errorf("room reaped inside the grace window (%d)", n)
@@ -553,10 +635,11 @@ func TestEnterEndsConnectedHostsOldRoom(t *testing.T) {
 func TestEnterEndsAwayHostsOldRoom(t *testing.T) {
 	hub, a, now := newTestRoom()
 	b := hub.Create("room2", "other", "bhost", now)
-	_, _ = hub.Enter(a, "host", "h", &fakeConn{}, now)
+	hostConn := &fakeConn{}
+	_, _ = hub.Enter(a, "host", "h", hostConn, now)
 	guest := &fakeConn{}
 	_, _ = hub.Enter(a, "guest", "g", guest, now)
-	a.Leave("host", now)
+	a.Leave("host", hostConn, now)
 
 	if _, err := hub.Enter(b, "host", "h", &fakeConn{}, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
@@ -602,8 +685,10 @@ func TestEnterSameRoomMovesNobody(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if old.count(TypeMoved) != 0 || old.finalReason != "" {
-		t.Errorf("rejoining must not move anybody: %v %q", old.types(), old.finalReason)
+	// A rejoin is a replacement, not a move: the old connection is told it was
+	// replaced (and closed for it), never that the person moved to another room.
+	if old.count(TypeMoved) != 0 || old.count(TypeReplaced) != 1 || old.finalReason == "You joined another room." {
+		t.Errorf("rejoining must replace, not move: %v %q", old.types(), old.finalReason)
 	}
 	if hostConn.count(TypeLeave) != 0 {
 		t.Errorf("no leave should be announced, got %v", hostConn.types())
@@ -623,7 +708,7 @@ func TestEnterLeavesDroppedGuestsOldRoomAlone(t *testing.T) {
 	hostConn, guestA := &fakeConn{}, &fakeConn{}
 	_, _ = hub.Enter(a, "host", "h", hostConn, now)
 	_, _ = hub.Enter(a, "guest", "g", guestA, now)
-	a.Leave("guest", now)
+	a.Leave("guest", guestA, now)
 	before := len(hostConn.frames)
 	guestA.frames = nil
 	guestA.closed = false

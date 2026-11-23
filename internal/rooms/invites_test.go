@@ -37,6 +37,10 @@ type inviteRig struct {
 	minted   []mintedMessage
 	mintErr  error
 	mintCtxs []context.Context
+
+	// The connection each person joined a room with, by room id and user id, so a
+	// test can leave as that connection.
+	conns map[[2]string]*fakeConn
 }
 
 // mintedMessage is one call to the injected "mint an invite message" func.
@@ -98,11 +102,21 @@ func (g *inviteRig) advance(d time.Duration) {
 func (g *inviteRig) room(id, host string, members ...string) *Room {
 	room := g.h.hub.Create(id, "amber-lantern", host, g.clock)
 	for _, m := range append([]string{host}, members...) {
-		if _, err := room.Join(m, "name-"+m, &fakeConn{}); err != nil {
+		conn := &fakeConn{}
+		if _, err := room.Join(m, "name-"+m, conn); err != nil {
 			g.t.Fatal(err)
 		}
+		if g.conns == nil {
+			g.conns = map[[2]string]*fakeConn{}
+		}
+		g.conns[[2]string{id, m}] = conn
 	}
 	return room
+}
+
+// leave takes `user` out of `room` as the connection they joined it with.
+func (g *inviteRig) leave(room *Room, user string) {
+	room.Leave(user, g.conns[[2]string{room.ID, user}], g.clock)
 }
 
 func (g *inviteRig) nudges(to string) []nudged {
@@ -426,8 +440,8 @@ func TestReapedRoomsInvitesExpire(t *testing.T) {
 	g.befriend("bob", "alice")
 	inv := decodeInvite(t, g.invite("room1", "bob", "alice"))
 
-	room.Leave("host", g.clock)
-	room.Leave("bob", g.clock)
+	g.leave(room, "host")
+	g.leave(room, "bob")
 	g.advance(emptyGrace + time.Second)
 	if n := g.h.hub.Reap(g.clock, emptyGrace); n != 1 {
 		t.Fatalf("reaped %d", n)
@@ -835,8 +849,8 @@ func TestExpiryIsToldExactlyOnceWhicheverPathGetsThereFirst(t *testing.T) {
 	t.Run("the sweep closes the room, then the hour passes", func(t *testing.T) {
 		g, room := standardRoom(t)
 		decodeInvite(t, g.invite("room1", "bob", "alice"))
-		room.Leave("host", g.clock)
-		room.Leave("bob", g.clock)
+		g.leave(room, "host")
+		g.leave(room, "bob")
 		g.advance(emptyGrace + time.Second)
 		if n := g.h.hub.Reap(g.clock, emptyGrace); n != 1 {
 			t.Fatalf("reaped %d", n)
