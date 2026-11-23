@@ -3,6 +3,7 @@ package rooms
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -12,13 +13,19 @@ import (
 // the reaper are all ordinary function calls.
 
 type fakeConn struct {
-	frames [][]byte
-	closed bool
+	frames      [][]byte
+	closed      bool
+	finalReason string
 }
 
 func (f *fakeConn) Send(msg []byte) { f.frames = append(f.frames, append([]byte(nil), msg...)) }
 
 func (f *fakeConn) Close() { f.closed = true }
+
+func (f *fakeConn) CloseFinal(reason string) {
+	f.closed = true
+	f.finalReason = reason
+}
 
 func (f *fakeConn) types() []string {
 	out := make([]string, 0, len(f.frames))
@@ -460,15 +467,201 @@ func TestReaperOnlyDropsRoomsEmptyPastTheGrace(t *testing.T) {
 	}
 }
 
-func TestRoomFull(t *testing.T) {
+// A lobby can have any number of members: there is no cap.
+func TestNoMemberCap(t *testing.T) {
 	_, room, _ := newTestRoom()
-	for i := 0; i < maxMembers; i++ {
-		if _, err := room.Join(string(rune('a'+i)), "x", &fakeConn{}); err != nil {
+	for i := 0; i < 100; i++ {
+		if _, err := room.Join(fmt.Sprintf("user-%d", i), "x", &fakeConn{}); err != nil {
 			t.Fatalf("join %d: %v", i, err)
 		}
 	}
-	if _, err := room.Join("one-too-many", "x", &fakeConn{}); err != ErrRoomFull {
-		t.Errorf("expected ErrRoomFull, got %v", err)
+	if n := len(room.Members()); n != 100 {
+		t.Errorf("expected 100 members, got %d", n)
+	}
+}
+
+func hasMember(r *Room, userID string) bool {
+	for _, m := range r.Members() {
+		if m.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// A guest who enters another room leaves the first: told `room:moved`, closed
+// with a final reason, gone from the roster, and the others see an ordinary leave.
+func TestEnterLeavesGuestsOldRoom(t *testing.T) {
+	hub, a, now := newTestRoom() // room1, host "host"
+	b := hub.Create("room2", "other", "bhost", now)
+	hostConn, guestA := &fakeConn{}, &fakeConn{}
+	_, _ = hub.Enter(a, "host", "h", hostConn, now)
+	if _, err := hub.Enter(a, "guest", "g", guestA, now); err != nil {
+		t.Fatal(err)
+	}
+
+	guestB := &fakeConn{}
+	if _, err := hub.Enter(b, "guest", "g", guestB, now); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := guestA.last(TypeMoved)
+	if moved == nil || moved["room"] != "room1" || moved["to"] != "room2" {
+		t.Errorf("old socket should get room:moved {room1 -> room2}, got %v", moved)
+	}
+	if !guestA.closed || guestA.finalReason == "" {
+		t.Errorf("old socket should be closed with a final reason, closed=%v reason=%q", guestA.closed, guestA.finalReason)
+	}
+	leave := hostConn.last(TypeLeave)
+	if leave == nil {
+		t.Fatal("the others in the old room should see room:leave")
+	}
+	if m, _ := leave["member"].(map[string]any); m["user_id"] != "guest" {
+		t.Errorf("room:leave should name the guest, got %v", leave)
+	}
+	if hasMember(a, "guest") {
+		t.Error("guest should be gone from room1's roster")
+	}
+	if !hasMember(b, "guest") {
+		t.Error("guest should be in room2's roster")
+	}
+	if a.Closed() {
+		t.Error("a guest moving must not end the room")
+	}
+}
+
+// A connected host who enters another room ends the one they host.
+func TestEnterEndsConnectedHostsOldRoom(t *testing.T) {
+	hub, a, now := newTestRoom()
+	b := hub.Create("room2", "other", "bhost", now)
+	hostConn, guest := &fakeConn{}, &fakeConn{}
+	_, _ = hub.Enter(a, "host", "h", hostConn, now)
+	_, _ = hub.Enter(a, "guest", "g", guest, now)
+
+	if _, err := hub.Enter(b, "host", "h", &fakeConn{}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Get("room1"); !errors.Is(err, ErrRoomNotFound) {
+		t.Errorf("room1 should be gone, got %v", err)
+	}
+	if guest.count(TypeClosed) != 1 {
+		t.Errorf("members of the ended room should get room:closed, got %v", guest.types())
+	}
+}
+
+// A host whose socket dropped (inside the grace) still hosts the room, so it ends.
+func TestEnterEndsAwayHostsOldRoom(t *testing.T) {
+	hub, a, now := newTestRoom()
+	b := hub.Create("room2", "other", "bhost", now)
+	_, _ = hub.Enter(a, "host", "h", &fakeConn{}, now)
+	guest := &fakeConn{}
+	_, _ = hub.Enter(a, "guest", "g", guest, now)
+	a.Leave("host", now)
+
+	if _, err := hub.Enter(b, "host", "h", &fakeConn{}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Get("room1"); !errors.Is(err, ErrRoomNotFound) {
+		t.Errorf("room1 should be gone, got %v", err)
+	}
+	if guest.count(TypeClosed) != 1 {
+		t.Errorf("guest should be told the room closed, got %v", guest.types())
+	}
+}
+
+// A room the host created but never connected to is still theirs.
+func TestEnterEndsCreatedButNeverEnteredRoom(t *testing.T) {
+	hub := NewHub()
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	a := hub.Create("roomA", "a", "host", now)
+	b := hub.Create("roomB", "b", "host", now)
+
+	if _, err := hub.Enter(b, "host", "h", &fakeConn{}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Get("roomA"); !errors.Is(err, ErrRoomNotFound) {
+		t.Errorf("roomA should be gone, got %v", err)
+	}
+	if !a.Closed() {
+		t.Error("roomA should be closed")
+	}
+	if _, err := hub.Get("roomB"); err != nil {
+		t.Errorf("roomB should be live, got %v", err)
+	}
+}
+
+// Entering the room you are already in is the reconnect path: nobody is moved,
+// nothing is closed, no ghost is left.
+func TestEnterSameRoomMovesNobody(t *testing.T) {
+	hub, a, now := newTestRoom()
+	hostConn := &fakeConn{}
+	_, _ = hub.Enter(a, "host", "h", hostConn, now)
+	old, fresh := &fakeConn{}, &fakeConn{}
+	_, _ = hub.Enter(a, "guest", "g", old, now)
+	if _, err := hub.Enter(a, "guest", "g", fresh, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if old.count(TypeMoved) != 0 || old.finalReason != "" {
+		t.Errorf("rejoining must not move anybody: %v %q", old.types(), old.finalReason)
+	}
+	if hostConn.count(TypeLeave) != 0 {
+		t.Errorf("no leave should be announced, got %v", hostConn.types())
+	}
+	if n := len(a.Members()); n != 2 {
+		t.Errorf("expected 2 members and no ghost, got %d", n)
+	}
+	if a.Closed() {
+		t.Error("room must stay open")
+	}
+}
+
+// A guest whose socket already dropped from the old room: nothing to do there.
+func TestEnterLeavesDroppedGuestsOldRoomAlone(t *testing.T) {
+	hub, a, now := newTestRoom()
+	b := hub.Create("room2", "other", "bhost", now)
+	hostConn, guestA := &fakeConn{}, &fakeConn{}
+	_, _ = hub.Enter(a, "host", "h", hostConn, now)
+	_, _ = hub.Enter(a, "guest", "g", guestA, now)
+	a.Leave("guest", now)
+	before := len(hostConn.frames)
+	guestA.frames = nil
+	guestA.closed = false
+
+	guestB := &fakeConn{}
+	if _, err := hub.Enter(b, "guest", "g", guestB, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(hostConn.frames) != before {
+		t.Errorf("old room should hear nothing, got %v", hostConn.types()[before:])
+	}
+	if len(guestA.frames) != 0 || guestA.closed || guestA.finalReason != "" {
+		t.Error("the dropped socket must not be touched")
+	}
+	if !hasMember(b, "guest") {
+		t.Error("guest should be in room2")
+	}
+	if a.Closed() {
+		t.Error("room1 must be untouched")
+	}
+}
+
+// The per-person index is pruned of rooms that are gone, and of people left with none.
+func TestReapPrunesAttached(t *testing.T) {
+	hub := NewHub()
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	hub.Create("gone", "g", "u1", now)
+	hub.Create("kept", "k", "u2", now.Add(time.Hour))
+	// Only "gone" has been empty past the grace.
+	hub.Reap(now.Add(10*time.Minute), 5*time.Minute)
+
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if _, ok := hub.attached["u1"]; ok {
+		t.Error("u1 has no live room left and should be dropped from the index")
+	}
+	if _, ok := hub.attached["u2"]["kept"]; !ok {
+		t.Error("u2's live room must stay in the index")
 	}
 }
 

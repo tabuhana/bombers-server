@@ -320,11 +320,11 @@ func (h *Handler) runMember(ctx context.Context, conn *websocket.Conn, room *Roo
 	out := make(chan []byte, sendQueue)
 	sender := &wsSender{out: out, closing: make(chan struct{})}
 
-	if _, err := room.Join(claims.UserID, claims.Username, sender); err != nil {
-		code := "room_full"
-		if errors.Is(err, ErrRoomClosed) {
-			code = "room_closed"
-		}
+	// Entering is where a person's other rooms are dealt with (see Hub.Enter): a
+	// room they host ends, one they are a member of is left.
+	if _, err := h.hub.Enter(room, claims.UserID, claims.Username, sender, time.Now()); err != nil {
+		// Join's only failure is the room having closed.
+		code := "room_closed"
 		frame, _ := encodeControl(TypeError, map[string]any{"code": code})
 		_ = conn.Write(ctx, websocket.MessageText, frame)
 		_ = conn.Close(websocket.StatusPolicyViolation, code)
@@ -374,7 +374,13 @@ func (h *Handler) runMember(ctx context.Context, conn *websocket.Conn, room *Roo
 					default:
 						// Everything queued is on the wire. NOW end it — the
 						// reader unblocks on the cancelled context and its
-						// deferred CloseNow shuts the socket.
+						// deferred CloseNow shuts the socket. When the member
+						// moved to another room (CloseFinal) the end is a proper
+						// 1008 close with its reason first, so the client knows
+						// not to reconnect.
+						if reason := sender.finalReason(); reason != "" {
+							_ = conn.Close(websocket.StatusPolicyViolation, reason)
+						}
 						cancel()
 						return
 					}
@@ -548,6 +554,19 @@ type wsSender struct {
 	// explains the disconnect. See the writer's drain case.
 	closing chan struct{}
 	once    sync.Once
+
+	// final is the reason of a CloseFinal, guarded by finalMu. When set at the end
+	// of the drain the writer closes with 1008 and this reason instead of just
+	// stopping.
+	finalMu sync.Mutex
+	final   string
+}
+
+// finalReason is the reason a CloseFinal recorded, or "" if there was none.
+func (s *wsSender) finalReason() string {
+	s.finalMu.Lock()
+	defer s.finalMu.Unlock()
+	return s.final
 }
 
 func (s *wsSender) Send(msg []byte) {
@@ -565,6 +584,20 @@ func (s *wsSender) Send(msg []byte) {
 // teardown path either way, but the last words get out first.
 func (s *wsSender) Close() {
 	s.once.Do(func() { close(s.closing) })
+}
+
+// CloseFinal is Close with a 1008 close and a reason the client is told not to
+// reconnect past. The reason is recorded BEFORE the drain is requested, so the
+// writer, which reads it only once the queue is empty, always sees it; if Close
+// already won and the drain has finished, it is too late and the plain close
+// stands. Safe to call more than once: the first reason is kept.
+func (s *wsSender) CloseFinal(reason string) {
+	s.finalMu.Lock()
+	if s.final == "" {
+		s.final = reason
+	}
+	s.finalMu.Unlock()
+	s.Close()
 }
 
 func mustControl(msgType string, data map[string]any) []byte {

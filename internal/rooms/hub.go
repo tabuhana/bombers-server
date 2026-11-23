@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tabuhana/bombers-server/internal/logx"
 )
 
 // Room control messages the SERVER generates. Namespaced so an activity's own
@@ -25,8 +27,9 @@ const (
 	TypeWelcome = "room:welcome" // sent to the joiner: who's here, who hosts, what this room is
 	TypeJoin    = "room:join"    // broadcast: someone arrived
 	TypeLeave   = "room:leave"   // broadcast: someone left
-	TypeUpdate  = "room:update"  // broadcast: the name, the chosen game or member_invites changed
+	TypeUpdate  = "room:update"  // broadcast: the name, the game the lobby is set to play, or member_invites changed
 	TypeKicked  = "room:kicked"  // sent to one member: the host removed you
+	TypeMoved   = "room:moved"   // sent to one member: you entered another room, so you left this one
 	TypeClosed  = "room:closed"  // broadcast: the room has ended, for everyone
 	TypeError   = "room:error"   // sent to one member: something was refused
 )
@@ -43,7 +46,7 @@ const (
 const (
 	CtlRename = "host:rename" // {name}        — retitle the room
 	CtlKick   = "host:kick"   // {user_id}     — remove a member
-	CtlGame   = "host:game"   // {activity_id} — point the room at a game
+	CtlGame   = "host:game"   // {activity_id} — set the game the lobby will play (sent on "Play as a group")
 	CtlEnd    = "host:end"    // {}            — close the room for everyone
 	// CtlInvites decides who may be invited here: {allow: true} lets any member
 	// invite their own friends, strangers to the host included; {allow: false}
@@ -57,7 +60,6 @@ const CtlPrefix = "host:"
 
 var (
 	ErrRoomNotFound = errors.New("room not found")
-	ErrRoomFull     = errors.New("room full")
 	ErrRoomClosed   = errors.New("room closed")
 	ErrNotHost      = errors.New("not the host")
 )
@@ -69,10 +71,6 @@ const (
 	MaxRoomNameLen   = 48
 	MaxActivityIDLen = 64
 )
-
-// maxMembers bounds a single room. Friends-scale by design — this is a game
-// lobby, not a broadcast channel.
-const maxMembers = 16
 
 // Rate limiting: a token bucket per member, sized for continuous position sync
 // (a 3D activity at ~30Hz) with headroom, so only a broken or hostile client
@@ -97,6 +95,15 @@ type Sender interface {
 	// leave sockets open waiting for clients to take the hint. Must be safe to
 	// call more than once.
 	Close()
+	// CloseFinal ends this member's connection AND tells the client not to come
+	// back: WebSocket status 1008 (policy violation) with `reason` (at most 123
+	// bytes, the protocol's limit). The room calls it when the member has moved to
+	// another room. A client that reconnects on an ordinary close would re-dial
+	// this room, which would move it out of the new one, and so on for ever; the
+	// desktop client treats 1008 as final and shows the reason. Like Close it
+	// flushes what is queued first, and it must be safe to call more than once,
+	// and together with Close.
+	CloseFinal(reason string)
 }
 
 // Member is one participant's presence in a room.
@@ -152,9 +159,9 @@ type Room struct {
 	// host at any time. Held here rather than by the clients because a joiner
 	// has to learn it from somewhere.
 	name string
-	// activityID is the game this room will start. Empty until the host picks
-	// one. The server holds the ID and nothing else — it still has no idea what
-	// any game DOES.
+	// activityID is the game the lobby is set to play, put there by the host when
+	// they press "Play as a group". Empty until then. The server holds the ID and
+	// nothing else — it still has no idea what any game DOES.
 	activityID string
 	// memberInvites is the host's switch for who may be invited: off (the zero
 	// value, and the default) means a member may invite only someone the room
@@ -309,7 +316,9 @@ func (r *Room) SetName(byUserID, name string) error {
 	return nil
 }
 
-// SetActivity points the room at a game (or clears it with ""). Host only.
+// SetActivity sets the game the lobby will play (or clears it with ""). Host
+// only. It is what `host:game` does, sent when the host presses "Play as a
+// group" rather than while merely browsing.
 //
 // The server records the id and learns nothing else. Whether anyone actually
 // HAS that game is a question the clients answer among themselves — this is
@@ -396,6 +405,38 @@ func (r *Room) Kick(byUserID, targetID string, now time.Time) error {
 	return nil
 }
 
+// moveOut takes a connected member out of this room because they entered
+// another (see Hub.Enter): they are told `room:moved` {room, to}, removed from the
+// roster, everyone else sees the ordinary `room:leave`, and their socket is
+// closed with 1008 so the client does not reconnect here.
+//
+// It has Kick's shape and is not a kick: leaving is the person's own choice, so
+// their invites to this room are NOT voided. A member who is not connected here
+// is a no-op.
+func (r *Room) moveOut(userID, toRoomID string, now time.Time) {
+	r.mu.Lock()
+	target, ok := r.members[userID]
+	if !ok {
+		r.mu.Unlock()
+		return
+	}
+	// Tell them first — after removal they're no longer a broadcast target.
+	if frame, err := encodeControl(TypeMoved, map[string]any{"room": r.ID, "to": toRoomID}); err == nil {
+		target.conn.Send(frame)
+	}
+	r.removeLocked(userID)
+	r.broadcastLocked(TypeLeave, map[string]any{
+		"member": MemberInfo{UserID: userID},
+		"host":   r.HostID,
+	}, "")
+	if len(r.members) == 0 {
+		r.emptySince = now
+	}
+	r.mu.Unlock()
+
+	target.conn.CloseFinal("You joined another room.")
+}
+
 // Close ends the room for everyone: each member is told and disconnected. Safe
 // to call twice — the second time does nothing.
 func (r *Room) Close() {
@@ -441,9 +482,6 @@ func (r *Room) Join(userID, username string, conn Sender) (*Member, error) {
 	}
 
 	existing, rejoining := r.members[userID]
-	if !rejoining && len(r.members) >= maxMembers {
-		return nil, ErrRoomFull
-	}
 
 	m := &Member{UserID: userID, Username: username, conn: conn}
 	if rejoining {
@@ -585,10 +623,83 @@ type Hub struct {
 	// onVoided tells the inviter and invitee that a kick voided an invite. Set the
 	// same way.
 	onVoided func(Invite)
+	// attached is each person's rooms: the ones they created, and the one their
+	// socket last entered (userID -> set of room ids). It is what makes "a person
+	// is in one room" a lookup instead of a scan of every room. Set at Create and
+	// at Enter, guarded by mu, and pruned by Reap of any room that is gone, so it
+	// stays bounded without bookkeeping on every room's exit path. A room id in it
+	// may be stale (the room ended); Enter checks the id against rooms.
+	attached map[string]map[string]struct{}
+	// enterMu serializes Enter, and is held by nothing else. Two sockets of one
+	// account racing into two different rooms must not both win: without it each
+	// would read the other's room as not yet theirs.
+	enterMu sync.Mutex
 }
 
 func NewHub() *Hub {
-	return &Hub{rooms: map[string]*Room{}, invites: newInviteIndex()}
+	return &Hub{rooms: map[string]*Room{}, invites: newInviteIndex(), attached: map[string]map[string]struct{}{}}
+}
+
+// attachLocked records that userID is attached to roomID. Caller holds mu.
+func (h *Hub) attachLocked(userID, roomID string) {
+	set, ok := h.attached[userID]
+	if !ok {
+		set = map[string]struct{}{}
+		h.attached[userID] = set
+	}
+	set[roomID] = struct{}{}
+}
+
+// Enter is how a person's socket comes into a room, and it enforces that a person
+// belongs to at most one: before joining `room`, every OTHER live room they are
+// attached to is dealt with.
+//
+//   - A room they HOST is ENDED, exactly as `host:end` does it (Close, then
+//     Remove), whether or not their socket is connected to it right now: a host
+//     away inside the grace period still hosts it, and leaving it standing with
+//     nobody able to run it would be the ghost this rule exists to prevent.
+//   - A room they are a connected MEMBER of is LEFT: they are sent `room:moved`,
+//     removed from the roster, the others see an ordinary `room:leave`, and the
+//     old socket is closed with 1008 so a client does not reconnect into it.
+//   - A room they were in whose socket has already dropped needs nothing.
+//
+// `room` itself is never touched, so rejoining the same room is the ordinary
+// replace-the-connection path. Creating a room moves nobody; the move happens
+// here, when the socket enters.
+//
+// Enter is serialized (enterMu) for its whole length. If the Join at the end then
+// fails (the room closed in the instant between the caller's Get and here) the
+// person HAS still left their old room. That is correct: they chose to go.
+//
+// No hub lock is held while a room is closed, written to or joined: it takes mu
+// only to read and rewrite the index, as Reap does.
+func (h *Hub) Enter(room *Room, userID, username string, conn Sender, now time.Time) (*Member, error) {
+	h.enterMu.Lock()
+	defer h.enterMu.Unlock()
+
+	h.mu.Lock()
+	var leaving []*Room
+	for id := range h.attached[userID] {
+		if id == room.ID {
+			continue
+		}
+		if r, ok := h.rooms[id]; ok {
+			leaving = append(leaving, r)
+		}
+	}
+	h.attached[userID] = map[string]struct{}{room.ID: {}}
+	h.mu.Unlock()
+
+	for _, r := range leaving {
+		if r.Host() == userID {
+			r.Close()
+			h.Remove(r.ID)
+			logx.Info("rooms: %s ended: its host %s entered room %s", r.ID, userID, room.ID)
+			continue
+		}
+		r.moveOut(userID, room.ID, now)
+	}
+	return room.Join(userID, username, conn)
 }
 
 // Create registers a new room hosted by `hostID`. The host doesn't join until
@@ -611,6 +722,7 @@ func (h *Hub) Create(id, name, hostID string, now time.Time) *Room {
 		onVoided:   h.onVoided,
 	}
 	h.rooms[id] = r
+	h.attachLocked(hostID, id)
 	return r
 }
 
@@ -659,6 +771,18 @@ func (h *Hub) Reap(now time.Time, grace time.Duration) int {
 		if empty || hostGone {
 			delete(h.rooms, id)
 			ending = append(ending, r)
+		}
+	}
+	// Prune the per-person index of every room that is gone (this sweep's and any
+	// ended another way), dropping people left with none.
+	for userID, set := range h.attached {
+		for id := range set {
+			if _, ok := h.rooms[id]; !ok {
+				delete(set, id)
+			}
+		}
+		if len(set) == 0 {
+			delete(h.attached, userID)
 		}
 	}
 	h.mu.Unlock()
