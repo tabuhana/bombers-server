@@ -74,6 +74,20 @@ type catalogEntry struct {
 	// older and says so. Empty means no floor — everything published before
 	// the field existed.
 	RequiresApp string `json:"requires_app,omitempty"`
+	// RequiresEngine is the engine this game runs on and the OLDEST version of
+	// it that works, from the manifest's `requiresEngine`. The server passes it
+	// through and never checks that the engine exists or compares versions: the
+	// client fetches the engine and refuses an older one, as it does for
+	// `requiresApp`. Omitted when the game declares none, or declares one with no
+	// id, so everything published before the field existed lists unchanged.
+	RequiresEngine *engineFloor `json:"requires_engine,omitempty"`
+}
+
+// engineFloor names the engine a game needs and the oldest version of it that
+// works. Both halves are the client's vocabulary; nothing here interprets them.
+type engineFloor struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
 }
 
 type players struct {
@@ -92,6 +106,10 @@ type manifestFields struct {
 		Icon        string   `json:"icon"`
 		Cover       string   `json:"cover"`
 		RequiresApp string   `json:"requiresApp"`
+		// Raw, and decoded on its own by decodeEngineFloor: a value of the
+		// wrong JSON type must not make this whole Unmarshal fail and lose the
+		// description, players and art with it.
+		RequiresEngine json.RawMessage `json:"requiresEngine"`
 	} `json:"manifest"`
 }
 
@@ -120,25 +138,52 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		var fields manifestFields
-		if err := json.Unmarshal(rec.Bundle, &fields); err == nil {
-			entry.Description = fields.Manifest.Description
-			entry.Category = fields.Manifest.Category
-			entry.Players = fields.Manifest.Players
-			entry.RequiresApp = fields.Manifest.RequiresApp
-			// Only advertise art that's really there. A manifest naming a file
-			// it forgot to ship would otherwise have every client fetch a 404
-			// for every listing, forever.
-			if shipped[fields.Manifest.Icon] {
-				entry.Icon = fields.Manifest.Icon
-			}
-			if shipped[fields.Manifest.Cover] {
-				entry.Cover = fields.Manifest.Cover
-			}
-		}
+		applyManifest(&entry, rec.Bundle, shipped)
 		out = append(out, entry)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"activities": out})
+}
+
+// applyManifest lifts the listing's descriptive keys out of a stored bundle onto
+// an entry. `shipped` is the set of asset paths the game really uploaded.
+func applyManifest(entry *catalogEntry, bundle []byte, shipped map[string]bool) {
+	var fields manifestFields
+	if err := json.Unmarshal(bundle, &fields); err != nil {
+		return
+	}
+	entry.Description = fields.Manifest.Description
+	entry.Category = fields.Manifest.Category
+	entry.Players = fields.Manifest.Players
+	entry.RequiresApp = fields.Manifest.RequiresApp
+	entry.RequiresEngine = decodeEngineFloor(fields.Manifest.RequiresEngine)
+	// Only advertise art that's really there. A manifest naming a file
+	// it forgot to ship would otherwise have every client fetch a 404
+	// for every listing, forever.
+	if shipped[fields.Manifest.Icon] {
+		entry.Icon = fields.Manifest.Icon
+	}
+	if shipped[fields.Manifest.Cover] {
+		entry.Cover = fields.Manifest.Cover
+	}
+}
+
+// decodeEngineFloor reads a manifest's `requiresEngine`, or returns nil when it
+// is absent, is not an object, or names no engine id. A malformed value costs
+// the listing nothing but this one key: it is decoded apart from the rest of the
+// manifest so it can never take the description, players or art down with it.
+func decodeEngineFloor(raw json.RawMessage) *engineFloor {
+	if len(raw) == 0 {
+		return nil
+	}
+	var floor engineFloor
+	if err := json.Unmarshal(raw, &floor); err != nil {
+		return nil
+	}
+	floor.ID = strings.TrimSpace(floor.ID)
+	if floor.ID == "" {
+		return nil
+	}
+	return &floor
 }
 
 // Download → GET /activities/{id}/bundle : the {manifest, files} JSON, plus the

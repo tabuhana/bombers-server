@@ -34,6 +34,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/console"
 	"github.com/tabuhana/bombers-server/internal/embeddedpg"
+	"github.com/tabuhana/bombers-server/internal/engines"
 	"github.com/tabuhana/bombers-server/internal/friends"
 	"github.com/tabuhana/bombers-server/internal/logx"
 	"github.com/tabuhana/bombers-server/internal/media"
@@ -451,6 +452,9 @@ func buildAndServe() (*app, error) {
 	// may exist in both and mean two different things, and two object-key
 	// prefixes, so their art cannot collide either.
 	appsHandler := apps.NewHandler(pool, storage)
+	// THE ENGINE STORE: the code a game runs on, published the way apps are. Its
+	// own table, route family and `engines/` object prefix.
+	enginesHandler := engines.NewHandler(pool, storage)
 	nodeshareHandler := nodeshare.NewHandler(pool)
 	// The people axis: a record and its answers. The nudge names the NODE as
 	// well as the writer, since the client has to wake one node and not all of
@@ -532,6 +536,9 @@ func buildAndServe() (*app, error) {
 			r.Get("/apps", appsHandler.List)
 			r.Get("/apps/{id}/bundle", appsHandler.Download)
 			r.Get("/apps/{id}/assets/*", appsHandler.Asset)
+			r.Get("/engines", enginesHandler.List)
+			r.Get("/engines/{id}/bundle", enginesHandler.Download)
+			r.Get("/engines/{id}/assets/*", enginesHandler.Asset)
 			r.Get("/nodes", nodesHandler.List)
 			r.Get("/nodes/{id}/bundle", nodesHandler.Download)
 			r.Get("/nodes/{id}/assets/*", nodesHandler.Asset)
@@ -643,6 +650,13 @@ func buildAndServe() (*app, error) {
 			r.Post("/apps", appsHandler.Publish)
 			r.Put("/apps/{id}/assets/*", appsHandler.PublishAsset)
 			r.Delete("/apps/{id}", appsHandler.Unpublish)
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
+			r.Use(admin.RequireAdmin(pool))
+			r.Post("/engines", enginesHandler.Publish)
+			r.Put("/engines/{id}/assets/*", enginesHandler.PublishAsset)
+			r.Delete("/engines/{id}", enginesHandler.Unpublish)
 		})
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
