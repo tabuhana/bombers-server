@@ -33,7 +33,14 @@ const (
 	// TypeReplaced is sent to one member's OLD connection: this room was opened again from another connection of yours
 	TypeReplaced = "room:replaced" // {room}
 	TypeClosed   = "room:closed"   // broadcast: the room has ended, for everyone
-	TypeError    = "room:error"    // sent to one member: something was refused
+	// TypeError is sent to one member: a frame of theirs was refused. {code, type?, ref?}:
+	// type is the refused frame's own `t` and ref is the one it carried, so the
+	// sender can tell which request this answers. Only a frame that never parsed
+	// (invalid_frame) and the join-time room_closed have neither.
+	TypeError = "room:error"
+	// TypeOK is sent to one member: their host request was done. {type, ref?} - the
+	// other half of the answer room:error gives, so every host request gets exactly one.
+	TypeOK = "room:ok"
 )
 
 // Requests a CLIENT may make of the room itself, as opposed to messages it wants

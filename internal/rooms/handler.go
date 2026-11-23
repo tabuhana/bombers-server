@@ -422,30 +422,45 @@ func (h *Handler) runMember(ctx context.Context, conn *websocket.Conn, room *Roo
 			return
 		}
 
-		e, ok := decodeIncoming(raw)
-		if !ok {
-			sender.Send(mustControl(TypeError, map[string]any{"code": "invalid_frame"}))
-			continue
-		}
-		// `room:` is the server's namespace - a client claiming to be one would
-		// let it forge presence.
-		if strings.HasPrefix(e.Type, "room:") {
-			sender.Send(mustControl(TypeError, map[string]any{"code": "reserved_type"}))
-			continue
-		}
-		// `host:` is a request OF the room rather than a message THROUGH it.
-		// Answered here and never relayed.
-		if strings.HasPrefix(e.Type, CtlPrefix) {
-			h.control(room, claims.UserID, e, sender)
-			continue
-		}
-		frame, err := stampFrom(e, claims.UserID)
-		if err != nil {
-			continue
-		}
-		if !room.Relay(claims.UserID, frame, time.Now()) {
-			sender.Send(mustControl(TypeError, map[string]any{"code": "rate_limited"}))
-		}
+		h.handleFrame(room, claims.UserID, raw, sender)
+	}
+}
+
+// handleFrame deals with one inbound frame: refuse it, answer it (a host request)
+// or relay it. It is the reader loop's body, pulled out so the rules can be driven
+// without a socket.
+func (h *Handler) handleFrame(room *Room, userID string, raw []byte, sender Sender) {
+	e, ok := decodeIncoming(raw)
+	if !ok {
+		// No usable type, so there is nothing to name and no ref to trust.
+		sender.Send(mustControl(TypeError, map[string]any{"code": "invalid_frame"}))
+		return
+	}
+	// A bad ref is refused before anything is acted on: a request run under a ref
+	// the sender cannot match to its answer is worse than one not run at all.
+	ref, ok := refOf(e)
+	if !ok {
+		sender.Send(refusal("invalid_ref", e, ""))
+		return
+	}
+	// `room:` is the server's namespace - a client claiming to be one would
+	// let it forge presence.
+	if strings.HasPrefix(e.Type, "room:") {
+		sender.Send(refusal("reserved_type", e, ref))
+		return
+	}
+	// `host:` is a request OF the room rather than a message THROUGH it.
+	// Answered here and never relayed.
+	if strings.HasPrefix(e.Type, CtlPrefix) {
+		h.control(room, userID, e, sender)
+		return
+	}
+	frame, err := stampFrom(e, userID)
+	if err != nil {
+		return
+	}
+	if !room.Relay(userID, frame, time.Now()) {
+		sender.Send(refusal("rate_limited", e, ref))
 	}
 }
 
@@ -479,21 +494,34 @@ type controlRequest struct {
 
 // control answers one host request.
 //
+// Every host request gets exactly one answer: `room:ok` or `room:error`, both
+// carrying the request's `type` and, when it gave one, its `ref`. A request that
+// succeeded and said nothing used to look the same as one still in flight, so the
+// sender could not tell "done" from "lost".
+//
 // Every refusal names its reason: unlike joining - where an opaque 404 stops a
 // room id being probed - the sender is already inside the room, so there is
 // nothing left to hide and a silent no-op would just look broken.
+//
+// On success the room's own `room:update` broadcast (rename, game, invites) goes
+// out inside the Room method, so the requester sees the update and then the ok.
 //
 // Ending the room needs no special handling here. Room.Close() ends every
 // member's connection including this one, so the host unwinds down the same
 // graceful path as everybody else: last frames flushed, then the context
 // cancelled, then the read below fails and runMember returns. Short-circuiting
 // out of the read loop instead would race the host's own `room:closed` off the
-// wire.
+// wire. The ok is sent BEFORE the close for the same reason: the drain flushes
+// it ahead of `room:closed`, whereas one sent after would find the queue shut.
 func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender) {
+	// handleFrame has already refused a bad ref; a frame that reaches here has a
+	// valid one or none.
+	ref, _ := refOf(e)
+
 	var req controlRequest
 	if len(e.Data) > 0 {
 		if err := json.Unmarshal(e.Data, &req); err != nil {
-			sender.Send(mustControl(TypeError, map[string]any{"code": errInvalidBody}))
+			sender.Send(refusal(errInvalidBody, e, ref))
 			return
 		}
 	}
@@ -508,7 +536,7 @@ func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender)
 		err = room.Kick(userID, req.UserID, h.now())
 	case CtlInvites:
 		if req.Allow == nil {
-			sender.Send(mustControl(TypeError, map[string]any{"code": errInvalidBody}))
+			sender.Send(refusal(errInvalidBody, e, ref))
 			return
 		}
 		err = room.SetMemberInvites(userID, *req.Allow)
@@ -516,9 +544,10 @@ func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender)
 		// The one control that answers by ending the conversation. Host only,
 		// same as the rest.
 		if room.Host() != userID {
-			sender.Send(mustControl(TypeError, map[string]any{"code": "not_host"}))
+			sender.Send(refusal("not_host", e, ref))
 			return
 		}
+		sender.Send(answer(e, ref))
 		room.Close()
 		h.hub.Remove(room.ID)
 		logx.Info("rooms: %s ended by its host", room.ID)
@@ -528,8 +557,10 @@ func (h *Handler) control(room *Room, userID string, e *envelope, sender Sender)
 	}
 
 	if err != nil {
-		sender.Send(mustControl(TypeError, map[string]any{"code": controlErrorCode(err)}))
+		sender.Send(refusal(controlErrorCode(err), e, ref))
+		return
 	}
+	sender.Send(answer(e, ref))
 }
 
 func controlErrorCode(err error) string {
