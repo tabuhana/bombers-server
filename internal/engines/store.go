@@ -27,8 +27,9 @@ type dbExecutor interface {
 
 // CatalogEntry is one store listing: the denormalized columns plus the light
 // display fields pulled out of the bundle's manifest at read time (engine,
-// description) — never the heavy files. There is no icon and no tags: an
-// engine is not browsed on a shelf, it is fetched because a game needs it.
+// description, icon, tags) and the size of what the engine ships — never the
+// heavy files. An engine is shown on the store's Engines shelf with its icon; it
+// is still also fetched automatically when a game needs it.
 type CatalogEntry struct {
 	ID      string
 	Name    string
@@ -37,7 +38,16 @@ type CatalogEntry struct {
 	// `""` when absent. The server never judges it.
 	Engine      string
 	Description string
-	UpdatedAt   time.Time
+	// Icon is the manifest's `icon` (an asset path), `""` unless an asset with
+	// exactly that path was really uploaded.
+	Icon string
+	// Tags are the manifest's `tags`; never nil, empty when absent or malformed.
+	Tags []string
+	// Assets and AssetBytes are how many files the engine shipped and their
+	// total size, 0 when none.
+	Assets     int
+	AssetBytes int64
+	UpdatedAt  time.Time
 	// RequiresApp is the OLDEST app version this works on, from the manifest's
 	// `requiresApp`. The client refuses to install or update onto anything
 	// older and says so. Empty means no floor.
@@ -96,20 +106,67 @@ func parseBundle(raw []byte) (BundleInfo, error) {
 	return BundleInfo{ID: id, Name: name, Version: strings.TrimSpace(b.Manifest.Version)}, nil
 }
 
-// catalogSQL lists every published engine, light fields only. engine/
-// description live inside the manifest; missing ones coalesce so a minimal
-// manifest still lists cleanly. `engine` is lifted as TEXT (`->>`): it is a
-// short type name like "2d", and a manifest that gave something else still
-// lists rather than failing the catalogue.
+// catalogSQL lists every published engine, light fields only, for the store's
+// Engines shelf (an engine is still also fetched automatically when a game
+// needs it). engine/description/tags live inside the manifest; missing ones
+// coalesce so a minimal manifest still lists cleanly. `engine` is lifted as TEXT
+// (`->>`): it is a short type name like "2d", and a manifest that gave
+// something else still lists rather than failing the catalogue.
+//
+// THE ICON IS LISTED ONLY WHEN IT WAS SHIPPED: the manifest's `icon` must be a
+// JSON string AND an engine_assets row must exist with exactly that path.
+// Otherwise it is the empty string — a manifest naming art it forgot to upload
+// would make every client fetch a 404 for every listing. A non-string `icon`
+// lists as the empty string and never fails the listing.
+//
+// ONE QUERY, NOT ONE PER ENGINE: the asset count and total size come from a
+// single grouped LEFT JOIN, and the icon check is an EXISTS in the same
+// statement, so the listing costs the same however many engines there are.
+// SUM over BIGINT is NUMERIC in Postgres, so it is cast back to BIGINT to scan
+// into an int64.
 const catalogSQL = `
-SELECT id, name, version,
-       COALESCE(bundle->'manifest'->>'engine', ''),
-       COALESCE(bundle->'manifest'->>'description', ''),
-       updated_at,
-       COALESCE(bundle->'manifest'->>'requiresApp', '')
-FROM engines
+SELECT e.id, e.name, e.version,
+       COALESCE(e.bundle->'manifest'->>'engine', ''),
+       COALESCE(e.bundle->'manifest'->>'description', ''),
+       CASE WHEN jsonb_typeof(e.bundle->'manifest'->'icon') = 'string'
+                 AND EXISTS (SELECT 1 FROM engine_assets x
+                             WHERE x.engine_id = e.id
+                               AND x.path = e.bundle->'manifest'->>'icon')
+            THEN e.bundle->'manifest'->>'icon'
+            ELSE '' END,
+       COALESCE(e.bundle->'manifest'->'tags', '[]'::jsonb),
+       COALESCE(a.n, 0),
+       COALESCE(a.bytes, 0),
+       e.updated_at,
+       COALESCE(e.bundle->'manifest'->>'requiresApp', '')
+FROM engines e
+LEFT JOIN (
+    SELECT engine_id, COUNT(*) AS n, SUM(size_bytes)::BIGINT AS bytes
+    FROM engine_assets
+    GROUP BY engine_id
+) a ON a.engine_id = e.id
 ORDER BY name
 `
+
+// decodeTags reads the manifest's tags tolerantly, as the node store does: no
+// tags, a non-array, or an array holding anything but strings all mean an empty
+// list, never a failed listing and never nil. A `null` ELEMENT counts as
+// anything-but-a-string too: decoded straight into []string it would quietly
+// become an empty tag "" on the shelf.
+func decodeTags(raw json.RawMessage) []string {
+	var elems []*string
+	if err := json.Unmarshal(raw, &elems); err != nil || elems == nil {
+		return []string{}
+	}
+	tags := make([]string, len(elems))
+	for i, s := range elems {
+		if s == nil {
+			return []string{}
+		}
+		tags[i] = *s
+	}
+	return tags
+}
 
 // Catalog returns every published engine's listing metadata, ordered by name.
 func Catalog(ctx context.Context, db dbExecutor) ([]CatalogEntry, error) {
@@ -122,9 +179,11 @@ func Catalog(ctx context.Context, db dbExecutor) ([]CatalogEntry, error) {
 	var out []CatalogEntry
 	for rows.Next() {
 		var e CatalogEntry
-		if err := rows.Scan(&e.ID, &e.Name, &e.Version, &e.Engine, &e.Description, &e.UpdatedAt, &e.RequiresApp); err != nil {
+		var rawTags json.RawMessage
+		if err := rows.Scan(&e.ID, &e.Name, &e.Version, &e.Engine, &e.Description, &e.Icon, &rawTags, &e.Assets, &e.AssetBytes, &e.UpdatedAt, &e.RequiresApp); err != nil {
 			return nil, fmt.Errorf("scan catalog entry: %w", err)
 		}
+		e.Tags = decodeTags(rawTags)
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {

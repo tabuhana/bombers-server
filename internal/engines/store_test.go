@@ -185,33 +185,44 @@ func TestWithAssetsIsAdditive(t *testing.T) {
 }
 
 // THE CATALOGUE QUERY LIFTS `engine` AND `description` AS TEXT and coalesces
-// both to "" so a minimal manifest still lists. It carries no icon and no tags:
-// an engine is fetched because a game needs it, never browsed on a shelf. The
-// query needs a database to run, so this pins its text, as the shape that
-// matters here.
+// both to "" so a minimal manifest still lists. It also lifts the icon (only
+// when shipped), the tags and the asset size for the store's Engines shelf, all
+// in the one statement. The query needs a database to run, so this pins its
+// text, as the shape that matters here.
 func TestCatalogSQLLiftsEngineAndDescription(t *testing.T) {
 	for _, want := range []string{
-		`COALESCE(bundle->'manifest'->>'engine', '')`,
-		`COALESCE(bundle->'manifest'->>'description', '')`,
-		`COALESCE(bundle->'manifest'->>'requiresApp', '')`,
-		`FROM engines`,
+		`COALESCE(e.bundle->'manifest'->>'engine', '')`,
+		`COALESCE(e.bundle->'manifest'->>'description', '')`,
+		`COALESCE(e.bundle->'manifest'->>'requiresApp', '')`,
+		`FROM engines e`,
 		`ORDER BY name`,
+		// the icon: a string AND really shipped
+		`jsonb_typeof(e.bundle->'manifest'->'icon') = 'string'`,
+		`EXISTS (SELECT 1 FROM engine_assets x`,
+		`x.path = e.bundle->'manifest'->>'icon'`,
+		// the tags: absent means an empty array
+		`COALESCE(e.bundle->'manifest'->'tags', '[]'::jsonb)`,
+		// the size: one grouped join, SUM cast to BIGINT
+		`LEFT JOIN (`,
+		`SUM(size_bytes)::BIGINT`,
+		`COALESCE(a.n, 0)`,
+		`COALESCE(a.bytes, 0)`,
 	} {
 		if !strings.Contains(catalogSQL, want) {
 			t.Errorf("catalogSQL is missing %q", want)
 		}
 	}
-	for _, unwanted := range []string{"icon", "tags"} {
-		if strings.Contains(catalogSQL, unwanted) {
-			t.Errorf("catalogSQL reads %q, which an engine listing does not carry", unwanted)
-		}
+	// ONE QUERY: the assets are never listed per engine from here.
+	if strings.Count(catalogSQL, "SELECT e.id") != 1 {
+		t.Errorf("catalogSQL should be one SELECT over engines")
 	}
 }
 
-// THE CATALOGUE WIRE SHAPE is exactly these keys: no icon, no tags. requires_app
-// is omitted when empty, as the app catalogue's is.
+// THE CATALOGUE WIRE SHAPE: id, name, version, engine, description, tags,
+// assets, asset_bytes and updated_at always; icon only when set; requires_app
+// only when set, as the app catalogue's is.
 func TestCatalogResponseKeys(t *testing.T) {
-	full, err := json.Marshal(catalogResponse{ID: "e", Engine: "2d", RequiresApp: "1.2.0"})
+	full, err := json.Marshal(catalogResponse{ID: "e", Engine: "2d", Icon: "art/icon.svg", Tags: []string{"2d"}, RequiresApp: "1.2.0"})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -219,16 +230,57 @@ func TestCatalogResponseKeys(t *testing.T) {
 	if err := json.Unmarshal(full, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, k := range []string{"id", "name", "version", "engine", "description", "updated_at", "requires_app"} {
+	for _, k := range []string{"id", "name", "version", "engine", "description", "icon", "tags", "assets", "asset_bytes", "updated_at", "requires_app"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("catalogue entry has no %q key: %s", k, full)
 		}
 	}
-	if len(m) != 7 {
-		t.Errorf("catalogue entry has %d keys, want 7: %s", len(m), full)
+	if len(m) != 11 {
+		t.Errorf("catalogue entry has %d keys, want 11: %s", len(m), full)
 	}
-	bare, _ := json.Marshal(catalogResponse{ID: "e"})
-	if strings.Contains(string(bare), "requires_app") {
-		t.Errorf("an empty requires_app was not omitted: %s", bare)
+
+	bare, _ := json.Marshal(catalogResponse{ID: "e", Tags: []string{}})
+	var b map[string]json.RawMessage
+	if err := json.Unmarshal(bare, &b); err != nil {
+		t.Fatalf("unmarshal bare: %v", err)
+	}
+	for _, k := range []string{"icon", "requires_app"} {
+		if _, ok := b[k]; ok {
+			t.Errorf("an empty %s was not omitted: %s", k, bare)
+		}
+	}
+	if string(b["tags"]) != "[]" {
+		t.Errorf("empty tags = %s, want []", b["tags"])
+	}
+	if string(b["assets"]) != "0" || string(b["asset_bytes"]) != "0" {
+		t.Errorf("assets/asset_bytes must be present as 0: %s", bare)
+	}
+}
+
+// Tags are an optional nicety: anything that is not an array of strings is no
+// tags, never a failed listing, and the result is never nil.
+func TestDecodeTags(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"absent coalesces to empty array", `[]`, []string{}},
+		{"null", `null`, []string{}},
+		{"not an array (object)", `{"a":1}`, []string{}},
+		{"not an array (string)", `"2d"`, []string{}},
+		{"mixed non-string elements", `["a", 1, true]`, []string{}},
+		{"only numbers", `[1, 2]`, []string{}},
+		{"a null element is not a string", `[null, "a"]`, []string{}},
+		{"normal", `["2d", "physics"]`, []string{"2d", "physics"}},
+	} {
+		got := decodeTags(json.RawMessage(tc.raw))
+		if got == nil {
+			t.Errorf("%s: got nil, want a non-nil slice", tc.name)
+			continue
+		}
+		if strings.Join(got, "|") != strings.Join(tc.want, "|") || len(got) != len(tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

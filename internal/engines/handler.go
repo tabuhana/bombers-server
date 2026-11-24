@@ -59,16 +59,26 @@ func NewHandler(pool *pgxpool.Pool, storage media.Store) *Handler {
 }
 
 // catalogResponse is the wire shape of one store listing — light manifest
-// fields only, never the files.
+// fields only, never the files. An engine is shown on the store's Engines shelf
+// with its icon, and is still also fetched automatically when a game needs it.
 type catalogResponse struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	// Engine is the manifest's `engine` (the engine's type, e.g. "2d"), `""`
 	// when absent. The server does not judge it.
-	Engine      string    `json:"engine"`
-	Description string    `json:"description"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Engine      string `json:"engine"`
+	Description string `json:"description"`
+	// Icon is an asset path, listed only when that asset was really uploaded;
+	// omitted otherwise.
+	Icon string `json:"icon,omitempty"`
+	// Tags is always an array, `[]` when the manifest has none.
+	Tags []string `json:"tags"`
+	// Assets and AssetBytes are the file count and total size the engine ships,
+	// always present (0 when none).
+	Assets     int       `json:"assets"`
+	AssetBytes int64     `json:"asset_bytes"`
+	UpdatedAt  time.Time `json:"updated_at"`
 	// RequiresApp is the OLDEST app version this works on, from the manifest's
 	// `requiresApp`. The client refuses to install or update onto anything
 	// older and says so. Empty means no floor.
@@ -92,6 +102,10 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			Version:     e.Version,
 			Engine:      e.Engine,
 			Description: e.Description,
+			Icon:        e.Icon,
+			Tags:        e.Tags,
+			Assets:      e.Assets,
+			AssetBytes:  e.AssetBytes,
 			UpdatedAt:   e.UpdatedAt,
 			RequiresApp: e.RequiresApp,
 		}
