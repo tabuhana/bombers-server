@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tabuhana/bombers-server/internal/logx"
@@ -19,9 +20,11 @@ var (
 	ErrInvalidRefresh = errors.New("invalid refresh token")
 
 	// ErrRefreshReused fires when an already-rotated refresh token is presented
-	// again. Service responds by invalidating every still-valid refresh token
-	// for the user (presumed-theft posture). The caller MUST NOT reveal this
-	// distinction to clients.
+	// again OUTSIDE the lost-answer grace (see LostAnswerWindow and
+	// decideRotation): later than the window, or after its replacement was
+	// used or revoked. Service responds by invalidating every still-valid
+	// refresh token for the user (presumed-theft posture). The caller MUST NOT
+	// reveal this distinction to clients.
 	ErrRefreshReused = errors.New("refresh token reuse detected")
 )
 
@@ -76,7 +79,13 @@ func (s *Service) IssueInitialPair(ctx context.Context, userID string) (TokenPai
 // Rotate consumes one refresh token and issues a fresh pair atomically.
 // The SELECT … FOR UPDATE row lock blocks a concurrent rotation on the same
 // token until the first commits, at which point the loser sees used_at
-// populated and triggers reuse detection.
+// populated and is judged by decideRotation.
+//
+// A used token presented again is theft EXCEPT inside a short grace: within
+// LostAnswerWindow of its use, while its replacement has not been used or
+// revoked, it is a lost reply. Rotate then answers with a fresh pair and
+// revokes the replacement nobody received. Once the real app has used its
+// replacement, or the window has passed, a retry is reuse again.
 //
 // Tx management is inlined (not via a generic helper) because the
 // reuse-detection branch MUST commit the cascade-kill UPDATE before
@@ -128,7 +137,44 @@ func (s *Service) Rotate(ctx context.Context, rawRefresh string) (TokenPair, err
 		return TokenPair{}, ErrInvalidRefresh
 	}
 
-	if row.UsedAt != nil {
+	// A used token may be a lost answer, which depends on whether its
+	// replacement has been used, so lock that row too. Lock order is always
+	// older -> newer along the replacement chain, so two rotations touching the
+	// same chain take their locks in the same order and cannot deadlock.
+	var replacement *refreshRow
+	if row.UsedAt != nil && row.ReplacedBy != nil {
+		rep, err := getRefreshTokenForUpdate(ctx, tx, *row.ReplacedBy)
+		switch {
+		case err == nil:
+			replacement = rep
+		case errors.Is(err, ErrInvalidRefresh):
+			replacement = nil
+		default:
+			return TokenPair{}, err
+		}
+	}
+
+	var repState *tokenState
+	if replacement != nil {
+		repState = &tokenState{
+			ExpiresAt:  replacement.ExpiresAt,
+			UsedAt:     replacement.UsedAt,
+			RevokedAt:  replacement.RevokedAt,
+			ReplacedBy: replacement.ReplacedBy,
+		}
+	}
+	verdict := decideRotation(tokenState{
+		ExpiresAt:  row.ExpiresAt,
+		UsedAt:     row.UsedAt,
+		RevokedAt:  row.RevokedAt,
+		ReplacedBy: row.ReplacedBy,
+	}, repState, time.Now())
+
+	switch verdict {
+	case verdictInvalid:
+		return TokenPair{}, ErrInvalidRefresh
+
+	case verdictReuse:
 		// REUSE DETECTED. Kill every still-valid refresh token for this
 		// user, then EXPLICITLY COMMIT so the kill persists — the deferred
 		// Rollback above must not undo this.
@@ -142,34 +188,63 @@ func (s *Service) Rotate(ctx context.Context, rawRefresh string) (TokenPair, err
 		}
 		logx.Warn("auth: refresh-token reuse detected for user %s; all tokens invalidated", row.UserID)
 		return TokenPair{}, ErrRefreshReused
+
+	case verdictRotate:
+		// Insert the new row FIRST: replaced_by is a foreign key to it.
+		pair, newJTI, err := s.issueAndStore(ctx, tx, row.UserID)
+		if err != nil {
+			return TokenPair{}, err
+		}
+		if err := markRefreshTokenUsed(ctx, tx, claims.JTI, newJTI); err != nil {
+			return TokenPair{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return TokenPair{}, fmt.Errorf("commit tx: %w", err)
+		}
+		return pair, nil
+
+	case verdictReissue:
+		// LOST ANSWER. The pair we rotated to never arrived, so cancel it and
+		// hand out a fresh one. used_at stays as it was: the window is measured
+		// from the original use and a retry never extends it.
+		pair, newJTI, err := s.issueAndStore(ctx, tx, row.UserID)
+		if err != nil {
+			return TokenPair{}, err
+		}
+		if err := revokeRefreshToken(ctx, tx, *row.ReplacedBy); err != nil {
+			return TokenPair{}, err
+		}
+		if err := setReplacedBy(ctx, tx, claims.JTI, newJTI); err != nil {
+			return TokenPair{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return TokenPair{}, fmt.Errorf("commit tx: %w", err)
+		}
+		logx.Info("auth: lost answer for user %s; re-issued and cancelled the unused replacement", row.UserID)
+		return pair, nil
 	}
 
-	if time.Now().After(row.ExpiresAt) {
-		return TokenPair{}, ErrInvalidRefresh
-	}
+	return TokenPair{}, ErrInvalidRefresh
+}
 
-	// Happy path: mark old used, issue+persist new pair, commit.
-	if err := markRefreshTokenUsed(ctx, tx, claims.JTI); err != nil {
-		return TokenPair{}, err
-	}
-	access, _, err := s.issuer.IssueAccessToken(row.UserID)
+// issueAndStore mints an access+refresh pair for userID and inserts the new
+// refresh row inside tx. It returns the new refresh token's jti so the caller
+// can link the old token to it.
+func (s *Service) issueAndStore(ctx context.Context, tx pgx.Tx, userID string) (TokenPair, string, error) {
+	access, _, err := s.issuer.IssueAccessToken(userID)
 	if err != nil {
-		return TokenPair{}, err
+		return TokenPair{}, "", err
 	}
-	refresh, newJTI, refreshExp, err := s.issuer.IssueRefreshToken(row.UserID)
+	refresh, newJTI, refreshExp, err := s.issuer.IssueRefreshToken(userID)
 	if err != nil {
-		return TokenPair{}, err
+		return TokenPair{}, "", err
 	}
-	if err := insertRefreshToken(ctx, tx, newJTI, row.UserID, refreshExp); err != nil {
-		return TokenPair{}, err
+	if err := insertRefreshToken(ctx, tx, newJTI, userID, refreshExp); err != nil {
+		return TokenPair{}, "", err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return TokenPair{}, fmt.Errorf("commit tx: %w", err)
-	}
-
 	return TokenPair{
 		AccessToken:  access,
 		RefreshToken: refresh,
 		ExpiresIn:    int(s.issuer.AccessTTL().Seconds()),
-	}, nil
+	}, newJTI, nil
 }

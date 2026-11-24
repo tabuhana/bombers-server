@@ -22,7 +22,10 @@ type dbExecutor interface {
 type refreshRow struct {
 	UserID    string
 	ExpiresAt time.Time
-	UsedAt    *time.Time // nil = still valid
+	UsedAt    *time.Time // non-nil = rotated (spent by its owner)
+
+	RevokedAt  *time.Time // non-nil = killed (theft kill, or its reply was lost)
+	ReplacedBy *string    // jti of the token issued in this one's place
 }
 
 const insertRefreshTokenSQL = `
@@ -41,7 +44,7 @@ func insertRefreshToken(ctx context.Context, db dbExecutor, id, userID string, e
 // calls with the same token can't both succeed — the second one blocks until
 // the first commits and then sees used_at populated.
 const getRefreshTokenForUpdateSQL = `
-SELECT user_id, expires_at, used_at
+SELECT user_id, expires_at, used_at, revoked_at, replaced_by
 FROM refresh_tokens
 WHERE id = $1
 FOR UPDATE
@@ -49,7 +52,8 @@ FOR UPDATE
 
 func getRefreshTokenForUpdate(ctx context.Context, tx pgx.Tx, id string) (*refreshRow, error) {
 	var r refreshRow
-	err := tx.QueryRow(ctx, getRefreshTokenForUpdateSQL, id).Scan(&r.UserID, &r.ExpiresAt, &r.UsedAt)
+	err := tx.QueryRow(ctx, getRefreshTokenForUpdateSQL, id).Scan(
+		&r.UserID, &r.ExpiresAt, &r.UsedAt, &r.RevokedAt, &r.ReplacedBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrInvalidRefresh
 	}
@@ -59,23 +63,53 @@ func getRefreshTokenForUpdate(ctx context.Context, tx pgx.Tx, id string) (*refre
 	return &r, nil
 }
 
-const markRefreshTokenUsedSQL = `UPDATE refresh_tokens SET used_at = NOW() WHERE id = $1`
+// markRefreshTokenUsedSQL records a rotation: used_at means ONLY "spent by its
+// owner", and replaced_by names the token issued in its place.
+const markRefreshTokenUsedSQL = `UPDATE refresh_tokens SET used_at = NOW(), replaced_by = $2 WHERE id = $1`
 
-func markRefreshTokenUsed(ctx context.Context, tx pgx.Tx, id string) error {
-	if _, err := tx.Exec(ctx, markRefreshTokenUsedSQL, id); err != nil {
+func markRefreshTokenUsed(ctx context.Context, tx pgx.Tx, id, replacedBy string) error {
+	if _, err := tx.Exec(ctx, markRefreshTokenUsedSQL, id, replacedBy); err != nil {
 		return fmt.Errorf("mark refresh token used: %w", err)
 	}
 	return nil
 }
 
+// setReplacedBySQL re-points a used token at a newer replacement. used_at is
+// deliberately NOT touched: the lost-answer window is measured from the
+// original use, and a retry must never extend it.
+const setReplacedBySQL = `UPDATE refresh_tokens SET replaced_by = $2 WHERE id = $1`
+
+func setReplacedBy(ctx context.Context, tx pgx.Tx, id, replacedBy string) error {
+	if _, err := tx.Exec(ctx, setReplacedBySQL, id, replacedBy); err != nil {
+		return fmt.Errorf("set refresh token replaced_by: %w", err)
+	}
+	return nil
+}
+
+// revokeRefreshTokenSQL cancels one token that nobody received (its reply was
+// lost). Only a token that is neither spent nor already killed.
+const revokeRefreshTokenSQL = `
+UPDATE refresh_tokens
+SET revoked_at = NOW()
+WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL
+`
+
+func revokeRefreshToken(ctx context.Context, tx pgx.Tx, id string) error {
+	if _, err := tx.Exec(ctx, revokeRefreshTokenSQL, id); err != nil {
+		return fmt.Errorf("revoke refresh token: %w", err)
+	}
+	return nil
+}
+
 // invalidateAllUserRefreshTokensSQL is the reuse-detection blast radius —
-// when a rotated token is presented again, every still-valid token belonging
-// to that user is killed so an attacker (and possibly the legitimate user)
-// is forced to re-authenticate.
+// when a rotated token is presented outside its grace, every still-valid
+// token belonging to that user is killed (revoked_at, not used_at: they were
+// never rotated) so an attacker (and possibly the legitimate user) is forced
+// to re-authenticate.
 const invalidateAllUserRefreshTokensSQL = `
 UPDATE refresh_tokens
-SET used_at = NOW()
-WHERE user_id = $1 AND used_at IS NULL
+SET revoked_at = NOW()
+WHERE user_id = $1 AND used_at IS NULL AND revoked_at IS NULL
 `
 
 func invalidateAllUserRefreshTokens(ctx context.Context, db dbExecutor, userID string) error {
