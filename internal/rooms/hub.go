@@ -621,6 +621,45 @@ func (r *Room) Relay(fromUserID string, frame []byte, now time.Time) bool {
 	return true
 }
 
+// RelayResult is what RelayTo did with a private frame.
+type RelayResult int
+
+const (
+	// RelayOK: the frame was delivered to its one recipient.
+	RelayOK RelayResult = iota
+	// RelayRateLimited: the sender is over budget (or is not in the room).
+	RelayRateLimited
+	// RelayNotInRoom: the addressee is not connected to this room right now.
+	RelayNotInRoom
+)
+
+// RelayTo delivers one member's frame to exactly one other member and to nobody
+// else, never the sender. The frame is built by the caller (stampTo).
+//
+// A sender who is not in the room gets RelayRateLimited, which is what Relay's
+// false means to its caller today. The rate token is spent BEFORE the addressee is
+// looked up, on purpose: a refused private frame still costs budget, so nobody can
+// flood the server with refusals for free. Only connected members can receive;
+// r.members holds exactly those.
+func (r *Room) RelayTo(fromUserID, toUserID string, frame []byte, now time.Time) RelayResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	m, ok := r.members[fromUserID]
+	if !ok {
+		return RelayRateLimited
+	}
+	if !m.allow(now) {
+		return RelayRateLimited
+	}
+	target, ok := r.members[toUserID]
+	if !ok {
+		return RelayNotInRoom
+	}
+	target.conn.Send(frame)
+	return RelayOK
+}
+
 // SendTo delivers a frame to one member (control messages, errors).
 func (r *Room) SendTo(userID string, frame []byte) {
 	r.mu.Lock()

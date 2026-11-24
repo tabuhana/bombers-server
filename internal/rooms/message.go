@@ -21,6 +21,20 @@ type envelope struct {
 	Data json.RawMessage `json:"d,omitempty"`
 	From string          `json:"from,omitempty"`
 	Ref  json.RawMessage `json:"ref,omitempty"`
+	// To is the sender's optional addressee, held raw for the same reason as Ref and
+	// validated by toOf. Like Ref it only travels inbound: nothing the server sends is
+	// ever built from this field (stampTo marshals its own validated string).
+	To json.RawMessage `json:"to,omitempty"`
+}
+
+// privateFrame is the outgoing shape of a frame addressed to one member. It is a
+// separate type from envelope so the raw inbound `to` can never be copied onto it:
+// `to` here is the validated user id the server marshals itself.
+type privateFrame struct {
+	Type string          `json:"t"`
+	Data json.RawMessage `json:"d,omitempty"`
+	From string          `json:"from,omitempty"`
+	To   string          `json:"to"`
 }
 
 // maxFrameBytes bounds a single relayed message. Generous for game state,
@@ -44,6 +58,19 @@ func refOf(e *envelope) (ref string, ok bool) {
 		return "", false
 	}
 	return ref, true
+}
+
+// toOf reads a frame's addressee. Absent, null and "" all mean no addressee (the
+// frame goes to everyone, as it always has). A `to` that is not a string is refused
+// (ok false) so the caller can answer invalid_to and not act on the frame.
+func toOf(e *envelope) (to string, ok bool) {
+	if len(e.To) == 0 || string(e.To) == "null" {
+		return "", true
+	}
+	if err := json.Unmarshal(e.To, &to); err != nil {
+		return "", false
+	}
+	return to, true
 }
 
 // refusal builds a `room:error` for a frame the sender sent: the code, the frame's
@@ -89,6 +116,16 @@ func decodeIncoming(raw []byte) (*envelope, bool) {
 // and sender only, so a ref the sender attached is never shown to anyone else.
 func stampFrom(e *envelope, userID string) ([]byte, error) {
 	return json.Marshal(envelope{Type: e.Type, Data: e.Data, From: userID})
+}
+
+// stampTo re-emits a client frame for private delivery: the authenticated sender in
+// `from` and the validated recipient in `to`, payload byte-for-byte, and no ref.
+//
+// `to` is forwarded deliberately. A client cannot put `to` on a broadcast (any `to`
+// is either a private delivery or refused), so a frame that arrives carrying `to`
+// is the server's guarantee that nobody else received it.
+func stampTo(e *envelope, fromID, toID string) ([]byte, error) {
+	return json.Marshal(privateFrame{Type: e.Type, Data: e.Data, From: fromID, To: toID})
 }
 
 // encodeControl builds one of the server's own `room:` messages.

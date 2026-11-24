@@ -42,6 +42,8 @@ const (
 	errRoomNotFound = "room_not_found"
 	errNotAllowed   = "room_not_found" // deliberately identical: never leak existence
 	errInvalidBody  = "invalid_body"
+	errInvalidTo    = "invalid_to"
+	errNotInRoom    = "not_in_room"
 )
 
 type Handler struct {
@@ -443,6 +445,13 @@ func (h *Handler) handleFrame(room *Room, userID string, raw []byte, sender Send
 		sender.Send(refusal("invalid_ref", e, ""))
 		return
 	}
+	// A `to` that is not a string is refused the same way, before anything is acted
+	// on.
+	to, ok := toOf(e)
+	if !ok {
+		sender.Send(refusal(errInvalidTo, e, ref))
+		return
+	}
 	// `room:` is the server's namespace - a client claiming to be one would
 	// let it forge presence.
 	if strings.HasPrefix(e.Type, "room:") {
@@ -450,17 +459,39 @@ func (h *Handler) handleFrame(room *Room, userID string, raw []byte, sender Send
 		return
 	}
 	// `host:` is a request OF the room rather than a message THROUGH it.
-	// Answered here and never relayed.
+	// Answered here and never relayed. It is never delivered to anyone, so a `to` on
+	// one is a client bug and is refused, not silently ignored.
 	if strings.HasPrefix(e.Type, CtlPrefix) {
+		if to != "" {
+			sender.Send(refusal(errInvalidTo, e, ref))
+			return
+		}
 		h.control(room, userID, e, sender)
 		return
 	}
-	frame, err := stampFrom(e, userID)
+	if to == userID {
+		sender.Send(refusal(errInvalidTo, e, ref))
+		return
+	}
+	if to == "" {
+		frame, err := stampFrom(e, userID)
+		if err != nil {
+			return
+		}
+		if !room.Relay(userID, frame, time.Now()) {
+			sender.Send(refusal("rate_limited", e, ref))
+		}
+		return
+	}
+	frame, err := stampTo(e, userID, to)
 	if err != nil {
 		return
 	}
-	if !room.Relay(userID, frame, time.Now()) {
+	switch room.RelayTo(userID, to, frame, time.Now()) {
+	case RelayRateLimited:
 		sender.Send(refusal("rate_limited", e, ref))
+	case RelayNotInRoom:
+		sender.Send(refusal(errNotInRoom, e, ref))
 	}
 }
 
