@@ -45,6 +45,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/nodeshare"
 	"github.com/tabuhana/bombers-server/internal/notify"
 	"github.com/tabuhana/bombers-server/internal/packs"
+	"github.com/tabuhana/bombers-server/internal/patchnotes"
 	"github.com/tabuhana/bombers-server/internal/presence"
 	"github.com/tabuhana/bombers-server/internal/profiles"
 	"github.com/tabuhana/bombers-server/internal/releases"
@@ -470,6 +471,7 @@ func buildAndServe() (*app, error) {
 	activitiesHandler := activities.NewHandler(pool, storage)
 	packsHandler := packs.NewHandler(pool, storage)
 	releasesHandler := releases.NewHandler(pool, storage)
+	patchNotesHandler := patchnotes.NewHandler(pool)
 	// Who is around is the nudge socket's answer, not a stored heartbeat: an app
 	// connecting and its last window closing are the two events, and presence turns
 	// each into one "look again" for that person's friends.
@@ -554,6 +556,10 @@ func buildAndServe() (*app, error) {
 			// current, which is nearly every call it ever makes.
 			r.Get("/releases/latest", releasesHandler.Latest)
 			r.Get("/releases/{version}/download", releasesHandler.Download)
+			// Every release's patch notes, for the app's patch-notes screen.
+			// Not on the releases rows: those prune to three, these never do.
+			r.Get("/patch-notes", patchNotesHandler.List)
+			r.Get("/patch-notes/{version}", patchNotesHandler.Get)
 		})
 		// Token scope: sending as you — the one action with a social consequence.
 		r.Group(func(r chi.Router) {
@@ -736,6 +742,14 @@ func buildAndServe() (*app, error) {
 			r.Post("/releases", releasesHandler.Publish)
 			r.Put("/releases/{version}/artifact", releasesHandler.PublishArtifact)
 			r.Delete("/releases/{version}", releasesHandler.Unpublish)
+		})
+		// Patch notes, written from the operator's desktop by the release
+		// script. HTTP-only, like releases: no console command.
+		r.Group(func(r chi.Router) {
+			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
+			r.Use(admin.RequireAdmin(pool))
+			r.Put("/patch-notes/{version}", patchNotesHandler.Put)
+			r.Delete("/patch-notes/{version}", patchNotesHandler.Delete)
 		})
 	})
 
