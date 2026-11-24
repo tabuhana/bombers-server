@@ -122,6 +122,26 @@ FROM apps
 ORDER BY name
 `
 
+// decodeTags reads the manifest's tags tolerantly: tags are an optional
+// nicety, so absent, `null`, a non-array, or an array holding anything but
+// strings all mean an empty list — never a failed listing and never nil. A
+// `null` ELEMENT counts as not-a-string too: decoded straight into []string it
+// would quietly become an empty tag "" on the shelf.
+func decodeTags(raw json.RawMessage) []string {
+	var elems []*string
+	if err := json.Unmarshal(raw, &elems); err != nil || elems == nil {
+		return []string{}
+	}
+	tags := make([]string, len(elems))
+	for i, s := range elems {
+		if s == nil {
+			return []string{}
+		}
+		tags[i] = *s
+	}
+	return tags
+}
+
 // Catalog returns every published app's listing metadata, ordered by name.
 func Catalog(ctx context.Context, db dbExecutor) ([]CatalogEntry, error) {
 	rows, err := db.Query(ctx, catalogSQL)
@@ -143,11 +163,7 @@ func Catalog(ctx context.Context, db dbExecutor) ([]CatalogEntry, error) {
 		if len(e.Icon) == 0 {
 			e.Icon = json.RawMessage("null")
 		}
-		// Tags are an optional manifest nicety — a malformed value just means
-		// no tags, never a failed listing.
-		if err := json.Unmarshal(rawTags, &e.Tags); err != nil || e.Tags == nil {
-			e.Tags = []string{}
-		}
+		e.Tags = decodeTags(rawTags)
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {
