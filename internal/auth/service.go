@@ -20,9 +20,9 @@ var (
 	ErrInvalidRefresh = errors.New("invalid refresh token")
 
 	// ErrRefreshReused fires when an already-rotated refresh token is presented
-	// again OUTSIDE the lost-answer grace (see LostAnswerWindow and
-	// decideRotation): later than the window, or after its replacement was
-	// used or revoked. Service responds by invalidating every still-valid
+	// again when it is not a lost answer (see decideRotation): its replacement
+	// was already used or revoked, or it has no recorded replacement. Service
+	// responds by invalidating every still-valid
 	// refresh token for the user (presumed-theft posture). The caller MUST NOT
 	// reveal this distinction to clients.
 	ErrRefreshReused = errors.New("refresh token reuse detected")
@@ -81,11 +81,11 @@ func (s *Service) IssueInitialPair(ctx context.Context, userID string) (TokenPai
 // token until the first commits, at which point the loser sees used_at
 // populated and is judged by decideRotation.
 //
-// A used token presented again is theft EXCEPT inside a short grace: within
-// LostAnswerWindow of its use, while its replacement has not been used or
-// revoked, it is a lost reply. Rotate then answers with a fresh pair and
-// revokes the replacement nobody received. Once the real app has used its
-// replacement, or the window has passed, a retry is reuse again.
+// A used token presented again is theft EXCEPT while its replacement has never
+// been used or revoked: then it is a lost reply, forgiven for as long as the
+// presented token itself is valid (no time window). Rotate answers with a fresh
+// pair and revokes the replacement nobody received. Once the real app has used
+// its replacement, a retry is reuse again.
 //
 // Tx management is inlined (not via a generic helper) because the
 // reuse-detection branch MUST commit the cascade-kill UPDATE before
@@ -205,8 +205,8 @@ func (s *Service) Rotate(ctx context.Context, rawRefresh string) (TokenPair, err
 
 	case verdictReissue:
 		// LOST ANSWER. The pair we rotated to never arrived, so cancel it and
-		// hand out a fresh one. used_at stays as it was: the window is measured
-		// from the original use and a retry never extends it.
+		// hand out a fresh one. used_at stays as it was: it records when the
+		// token was first spent.
 		pair, newJTI, err := s.issueAndStore(ctx, tx, row.UserID)
 		if err != nil {
 			return TokenPair{}, err

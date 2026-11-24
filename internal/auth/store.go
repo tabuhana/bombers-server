@@ -75,8 +75,8 @@ func markRefreshTokenUsed(ctx context.Context, tx pgx.Tx, id, replacedBy string)
 }
 
 // setReplacedBySQL re-points a used token at a newer replacement. used_at is
-// deliberately NOT touched: the lost-answer window is measured from the
-// original use, and a retry must never extend it.
+// deliberately NOT touched: it records when the token was first spent, and a
+// retry must not rewrite that.
 const setReplacedBySQL = `UPDATE refresh_tokens SET replaced_by = $2 WHERE id = $1`
 
 func setReplacedBy(ctx context.Context, tx pgx.Tx, id, replacedBy string) error {
@@ -102,7 +102,7 @@ func revokeRefreshToken(ctx context.Context, tx pgx.Tx, id string) error {
 }
 
 // invalidateAllUserRefreshTokensSQL is the reuse-detection blast radius —
-// when a rotated token is presented outside its grace, every still-valid
+// when a rotated token is presented and is not a lost answer, every still-valid
 // token belonging to that user is killed (revoked_at, not used_at: they were
 // never rotated) so an attacker (and possibly the legitimate user) is forced
 // to re-authenticate.

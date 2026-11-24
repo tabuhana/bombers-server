@@ -2,10 +2,6 @@ package auth
 
 import "time"
 
-// LostAnswerWindow is how long after a refresh token was rotated its owner may
-// present it again and be treated as having never received the reply.
-const LostAnswerWindow = 10 * time.Minute
-
 // rotateVerdict is what Rotate must do with a presented refresh token.
 type rotateVerdict int
 
@@ -29,43 +25,43 @@ type tokenState struct {
 // look at (no replaced_by, or the row is gone).
 //
 // A used token presented again is usually theft, but not always: if the reply
-// to a rotation never reached the app (wifi drop, restart), the app still holds
-// the old token and retries with it. That retry is a LOST ANSWER and is let
-// through, once, inside LostAnswerWindow of the original use.
+// to a rotation never reached the app (wifi drop, a laptop that slept), the app
+// still holds the old token and retries with it. That retry is a LOST ANSWER
+// and is let through for as long as the old token itself is valid, bounded only
+// by its own refresh expiry. There is no time window.
 //
-// WHY the replacement check exists: the replacement is the token the server
-// handed out in the lost reply. If it has been used or revoked, then the real
-// app is already running on it (or it was cancelled), so the old token can
-// only be coming from someone else. The window therefore never lets a stolen
-// token race the real one: the moment the real app moves on, the old token is
-// theft again, inside the window or not.
+// No time limit is needed because the replacement check is what catches theft.
+// If a thief presents the old token they get a pair, and the real app's
+// unreceived replacement is cancelled; the real app's next renewal then
+// presents a revoked token (or, if it still holds the old token, finds the
+// thief's replacement already used) and everything is killed. A used token is
+// only forgivable while its successor is unused, which is exactly as long as
+// the successor itself would be usable to whoever could have taken the old
+// one, so forgiving it adds no exposure.
 func decideRotation(presented tokenState, replacement *tokenState, now time.Time) rotateVerdict {
 	// 1. A killed token presented again is theft.
 	if presented.RevokedAt != nil {
 		return verdictReuse
 	}
-	// 2. Never used: an ordinary rotation, unless it has expired.
+	// 2. Expired, used or not: a plain refusal, no kill. The JWT's own exp
+	// check in Issuer.parse normally refuses an expired token before this runs;
+	// this is the database's copy of the same rule.
+	if now.After(presented.ExpiresAt) {
+		return verdictInvalid
+	}
+	// 3. Never used: an ordinary rotation.
 	if presented.UsedAt == nil {
-		if now.After(presented.ExpiresAt) {
-			return verdictInvalid
-		}
 		return verdictRotate
 	}
-	// 3. Used. Only a lost answer is forgiven.
+	// 4. Used. Only a lost answer is forgiven.
 	if presented.ReplacedBy == nil {
 		return verdictReuse // killed before the migration, or no record of a replacement
-	}
-	if now.Sub(*presented.UsedAt) > LostAnswerWindow {
-		return verdictReuse // exactly LostAnswerWindow is still inside
-	}
-	if now.After(presented.ExpiresAt) {
-		return verdictReuse
 	}
 	if replacement == nil || replacement.UsedAt != nil || replacement.RevokedAt != nil {
 		return verdictReuse
 	}
 	if now.After(replacement.ExpiresAt) {
-		return verdictReuse
+		return verdictInvalid // nothing left to forgive, and no sign of theft
 	}
 	return verdictReissue
 }
