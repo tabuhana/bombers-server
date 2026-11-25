@@ -202,6 +202,8 @@ func TestCatalogSQLLiftsEngineAndDescription(t *testing.T) {
 		`x.path = e.bundle->'manifest'->>'icon'`,
 		// the tags: absent means an empty array
 		`COALESCE(e.bundle->'manifest'->'tags', '[]'::jsonb)`,
+		// the replaces list: absent means an empty array
+		`COALESCE(e.bundle->'manifest'->'replaces', '[]'::jsonb)`,
 		// the size: one grouped join, SUM cast to BIGINT
 		`LEFT JOIN (`,
 		`SUM(size_bytes)::BIGINT`,
@@ -219,7 +221,7 @@ func TestCatalogSQLLiftsEngineAndDescription(t *testing.T) {
 }
 
 // THE CATALOGUE WIRE SHAPE: id, name, version, engine, description, tags,
-// assets, asset_bytes and updated_at always; icon only when set; requires_app
+// replaces, assets, asset_bytes and updated_at always; icon only when set; requires_app
 // only when set, as the app catalogue's is.
 func TestCatalogResponseKeys(t *testing.T) {
 	full, err := json.Marshal(catalogResponse{ID: "e", Engine: "2d", Icon: "art/icon.svg", Tags: []string{"2d"}, RequiresApp: "1.2.0"})
@@ -230,16 +232,16 @@ func TestCatalogResponseKeys(t *testing.T) {
 	if err := json.Unmarshal(full, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, k := range []string{"id", "name", "version", "engine", "description", "icon", "tags", "assets", "asset_bytes", "updated_at", "requires_app"} {
+	for _, k := range []string{"id", "name", "version", "engine", "description", "icon", "tags", "replaces", "assets", "asset_bytes", "updated_at", "requires_app"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("catalogue entry has no %q key: %s", k, full)
 		}
 	}
-	if len(m) != 11 {
-		t.Errorf("catalogue entry has %d keys, want 11: %s", len(m), full)
+	if len(m) != 12 {
+		t.Errorf("catalogue entry has %d keys, want 12: %s", len(m), full)
 	}
 
-	bare, _ := json.Marshal(catalogResponse{ID: "e", Tags: []string{}})
+	bare, _ := json.Marshal(catalogResponse{ID: "e", Tags: []string{}, Replaces: []string{}})
 	var b map[string]json.RawMessage
 	if err := json.Unmarshal(bare, &b); err != nil {
 		t.Fatalf("unmarshal bare: %v", err)
@@ -252,14 +254,17 @@ func TestCatalogResponseKeys(t *testing.T) {
 	if string(b["tags"]) != "[]" {
 		t.Errorf("empty tags = %s, want []", b["tags"])
 	}
+	if string(b["replaces"]) != "[]" {
+		t.Errorf("empty replaces = %s, want []", b["replaces"])
+	}
 	if string(b["assets"]) != "0" || string(b["asset_bytes"]) != "0" {
 		t.Errorf("assets/asset_bytes must be present as 0: %s", bare)
 	}
 }
 
-// Tags are an optional nicety: anything that is not an array of strings is no
-// tags, never a failed listing, and the result is never nil.
-func TestDecodeTags(t *testing.T) {
+// Tags and replaces are both read by decodeStringList: anything that is not an
+// array of strings is an empty list, never a failed listing, and never nil.
+func TestDecodeStringList(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		raw  string
@@ -274,7 +279,7 @@ func TestDecodeTags(t *testing.T) {
 		{"a null element is not a string", `[null, "a"]`, []string{}},
 		{"normal", `["2d", "physics"]`, []string{"2d", "physics"}},
 	} {
-		got := decodeTags(json.RawMessage(tc.raw))
+		got := decodeStringList(json.RawMessage(tc.raw))
 		if got == nil {
 			t.Errorf("%s: got nil, want a non-nil slice", tc.name)
 			continue

@@ -74,6 +74,9 @@ type catalogResponse struct {
 	Icon string `json:"icon,omitempty"`
 	// Tags is always an array, `[]` when the manifest has none.
 	Tags []string `json:"tags"`
+	// Replaces is always an array, `[]` when the manifest names none; ids of
+	// games this engine takes over.
+	Replaces []string `json:"replaces"`
 	// Assets and AssetBytes are the file count and total size the engine ships,
 	// always present (0 when none).
 	Assets     int       `json:"assets"`
@@ -104,6 +107,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			Description: e.Description,
 			Icon:        e.Icon,
 			Tags:        e.Tags,
+			Replaces:    e.Replaces,
 			Assets:      e.Assets,
 			AssetBytes:  e.AssetBytes,
 			UpdatedAt:   e.UpdatedAt,

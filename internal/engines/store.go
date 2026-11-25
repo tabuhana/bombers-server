@@ -43,6 +43,11 @@ type CatalogEntry struct {
 	Icon string
 	// Tags are the manifest's `tags`; never nil, empty when absent or malformed.
 	Tags []string
+	// Replaces is the manifest's `replaces`: ids of games this engine takes
+	// over, so a client can move a friend off a game it never fetched this
+	// engine's manifest for. Never nil, empty when absent or malformed; the
+	// server does not check the games exist.
+	Replaces []string
 	// Assets and AssetBytes are how many files the engine shipped and their
 	// total size, 0 when none.
 	Assets     int
@@ -108,8 +113,8 @@ func parseBundle(raw []byte) (BundleInfo, error) {
 
 // catalogSQL lists every published engine, light fields only, for the store's
 // Engines shelf (an engine is still also fetched automatically when a game
-// needs it). engine/description/tags live inside the manifest; missing ones
-// coalesce so a minimal manifest still lists cleanly. `engine` is lifted as TEXT
+// needs it). engine/description/tags/replaces live inside the manifest; missing
+// ones coalesce so a minimal manifest still lists cleanly. `engine` is lifted as TEXT
 // (`->>`): it is a short type name like "2d", and a manifest that gave
 // something else still lists rather than failing the catalogue.
 //
@@ -135,6 +140,7 @@ SELECT e.id, e.name, e.version,
             THEN e.bundle->'manifest'->>'icon'
             ELSE '' END,
        COALESCE(e.bundle->'manifest'->'tags', '[]'::jsonb),
+       COALESCE(e.bundle->'manifest'->'replaces', '[]'::jsonb),
        COALESCE(a.n, 0),
        COALESCE(a.bytes, 0),
        e.updated_at,
@@ -148,12 +154,12 @@ LEFT JOIN (
 ORDER BY name
 `
 
-// decodeTags reads the manifest's tags tolerantly, as the node store does: no
-// tags, a non-array, or an array holding anything but strings all mean an empty
-// list, never a failed listing and never nil. A `null` ELEMENT counts as
-// anything-but-a-string too: decoded straight into []string it would quietly
-// become an empty tag "" on the shelf.
-func decodeTags(raw json.RawMessage) []string {
+// decodeStringList reads a manifest list of strings (tags, replaces) tolerantly,
+// as the node store does: none, a non-array, or an array holding anything but
+// strings all mean an empty list, never a failed listing and never nil. A
+// `null` ELEMENT counts as anything-but-a-string too: decoded straight into
+// []string it would quietly become an empty entry "" on the shelf.
+func decodeStringList(raw json.RawMessage) []string {
 	var elems []*string
 	if err := json.Unmarshal(raw, &elems); err != nil || elems == nil {
 		return []string{}
@@ -180,10 +186,12 @@ func Catalog(ctx context.Context, db dbExecutor) ([]CatalogEntry, error) {
 	for rows.Next() {
 		var e CatalogEntry
 		var rawTags json.RawMessage
-		if err := rows.Scan(&e.ID, &e.Name, &e.Version, &e.Engine, &e.Description, &e.Icon, &rawTags, &e.Assets, &e.AssetBytes, &e.UpdatedAt, &e.RequiresApp); err != nil {
+		var rawReplaces json.RawMessage
+		if err := rows.Scan(&e.ID, &e.Name, &e.Version, &e.Engine, &e.Description, &e.Icon, &rawTags, &rawReplaces, &e.Assets, &e.AssetBytes, &e.UpdatedAt, &e.RequiresApp); err != nil {
 			return nil, fmt.Errorf("scan catalog entry: %w", err)
 		}
-		e.Tags = decodeTags(rawTags)
+		e.Tags = decodeStringList(rawTags)
+		e.Replaces = decodeStringList(rawReplaces)
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {
