@@ -33,6 +33,7 @@ import (
 	"github.com/tabuhana/bombers-server/internal/auth"
 	"github.com/tabuhana/bombers-server/internal/config"
 	"github.com/tabuhana/bombers-server/internal/console"
+	"github.com/tabuhana/bombers-server/internal/deadline"
 	"github.com/tabuhana/bombers-server/internal/embeddedpg"
 	"github.com/tabuhana/bombers-server/internal/engines"
 	"github.com/tabuhana/bombers-server/internal/friends"
@@ -492,6 +493,8 @@ func buildAndServe() (*app, error) {
 	issuer.SetTokenResolver(tokensHandler)
 
 	r := chi.NewRouter()
+	dl := deadline.New(deadline.Default)
+	r.Use(dl.Middleware)
 	allowedOrigins := corsOrigins(cfg.CorsAllowedOrigin)
 	logx.Info("allowing browser origins: %s", strings.Join(allowedOrigins, ", "))
 	r.Use(cors.Handler(cors.Options{
@@ -515,16 +518,8 @@ func buildAndServe() (*app, error) {
 	// What a token may be granted. A constant, and a client needs it before it
 	// has anywhere to put a token, so it sits outside the auth group.
 	r.Get("/token-scopes", tokensHandler.Scopes)
-	// Activity rooms: the realtime relay. The JOIN is a WebSocket upgrade and so
-	// sits OUTSIDE the RequireAuth group - a webview cannot put an Authorization
-	// header on a socket, so the access token rides the `bearer` subprotocol and
-	// the handler verifies it with the same issuer.
-	r.Get("/rooms/{roomID}/ws", roomsHandler.Join)
-
-	// The per-user nudge socket, same auth trick and outside RequireAuth for the
-	// same reason. It carries no content — only "go and re-read something" — so a
-	// client that never connects is stale, never wrong.
-	r.Get("/notify/ws", notifyHandler.Listen)
+	// The two WebSocket routes (rooms join, notify) are registered Live.
+	registerSockets(r, dl, roomsHandler.Join, notifyHandler.Listen)
 
 	r.Group(func(r chi.Router) {
 		r.Use(issuer.RequireAuth)
@@ -536,26 +531,26 @@ func buildAndServe() (*app, error) {
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreRead))
 			r.Get("/apps", appsHandler.List)
-			r.Get("/apps/{id}/bundle", appsHandler.Download)
-			r.Get("/apps/{id}/assets/*", appsHandler.Asset)
+			r.With(dl.Transfer).Get("/apps/{id}/bundle", appsHandler.Download)
+			r.With(dl.Transfer).Get("/apps/{id}/assets/*", appsHandler.Asset)
 			r.Get("/engines", enginesHandler.List)
-			r.Get("/engines/{id}/bundle", enginesHandler.Download)
-			r.Get("/engines/{id}/assets/*", enginesHandler.Asset)
+			r.With(dl.Transfer).Get("/engines/{id}/bundle", enginesHandler.Download)
+			r.With(dl.Transfer).Get("/engines/{id}/assets/*", enginesHandler.Asset)
 			r.Get("/nodes", nodesHandler.List)
-			r.Get("/nodes/{id}/bundle", nodesHandler.Download)
-			r.Get("/nodes/{id}/assets/*", nodesHandler.Asset)
+			r.With(dl.Transfer).Get("/nodes/{id}/bundle", nodesHandler.Download)
+			r.With(dl.Transfer).Get("/nodes/{id}/assets/*", nodesHandler.Asset)
 			r.Get("/activities", activitiesHandler.List)
-			r.Get("/activities/{id}/bundle", activitiesHandler.Download)
-			r.Get("/activities/{id}/assets/*", activitiesHandler.Asset)
+			r.With(dl.Transfer).Get("/activities/{id}/bundle", activitiesHandler.Download)
+			r.With(dl.Transfer).Get("/activities/{id}/assets/*", activitiesHandler.Asset)
 			r.Get("/packs", packsHandler.List)
-			r.Get("/packs/{id}/bundle", packsHandler.Download)
-			r.Get("/packs/{id}/assets/*", packsHandler.Asset)
+			r.With(dl.Transfer).Get("/packs/{id}/bundle", packsHandler.Download)
+			r.With(dl.Transfer).Get("/packs/{id}/assets/*", packsHandler.Asset)
 			// The app's own updates. On the same shelf as everything else you
 			// install from here — the difference is only that the thing being
 			// installed is Bombers. `latest` answers 204 for a client that's
 			// current, which is nearly every call it ever makes.
 			r.Get("/releases/latest", releasesHandler.Latest)
-			r.Get("/releases/{version}/download", releasesHandler.Download)
+			r.With(dl.Transfer).Get("/releases/{version}/download", releasesHandler.Download)
 			// Every release's patch notes, for the app's patch-notes screen.
 			// Not on the releases rows: those prune to three, these never do.
 			r.Get("/patch-notes", patchNotesHandler.List)
@@ -568,7 +563,7 @@ func buildAndServe() (*app, error) {
 			// A picture is the other way to send: raw bytes in the body, the recipient and
 			// nonce in the query. Static, so it wins over /messages/{userID}/... the way
 			// /messages/unread does.
-			r.Post("/messages/image", messagingHandler.SendImage)
+			r.With(dl.Transfer).Post("/messages/image", messagingHandler.SendImage)
 			r.Patch("/messages/{messageID}", messagingHandler.Edit)
 			r.Delete("/messages/{messageID}", messagingHandler.Delete)
 			// Either person in a conversation may pin or unpin either one's message.
@@ -592,7 +587,7 @@ func buildAndServe() (*app, error) {
 			r.Get("/messages/{userID}", messagingHandler.History)
 			r.Get("/messages/{userID}/pins", messagingHandler.Pins)
 			// A picture, through the server like every other byte: never a bucket URL.
-			r.Get("/messages/{messageID}/image", messagingHandler.ServeImage)
+			r.With(dl.Transfer).Get("/messages/{messageID}/image", messagingHandler.ServeImage)
 			r.Get("/conversations", messagingHandler.Conversations)
 		})
 		// Token scope: the cards you keep about people — the most personal thing here.
@@ -653,27 +648,27 @@ func buildAndServe() (*app, error) {
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
-			r.Post("/apps", appsHandler.Publish)
-			r.Put("/apps/{id}/assets/*", appsHandler.PublishAsset)
+			r.With(dl.Transfer).Post("/apps", appsHandler.Publish)
+			r.With(dl.Transfer).Put("/apps/{id}/assets/*", appsHandler.PublishAsset)
 			r.Delete("/apps/{id}", appsHandler.Unpublish)
 		})
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
-			r.Post("/engines", enginesHandler.Publish)
-			r.Put("/engines/{id}/assets/*", enginesHandler.PublishAsset)
+			r.With(dl.Transfer).Post("/engines", enginesHandler.Publish)
+			r.With(dl.Transfer).Put("/engines/{id}/assets/*", enginesHandler.PublishAsset)
 			r.Delete("/engines/{id}", enginesHandler.Unpublish)
 		})
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
-			r.Post("/nodes", nodesHandler.Publish)
-			r.Put("/nodes/{id}/assets/*", nodesHandler.PublishAsset)
+			r.With(dl.Transfer).Post("/nodes", nodesHandler.Publish)
+			r.With(dl.Transfer).Put("/nodes/{id}/assets/*", nodesHandler.PublishAsset)
 			r.Delete("/nodes/{id}", nodesHandler.Unpublish)
 		})
 		// Friend node-sharing (the clone model): a one-way transfer inbox,
 		// friend-gated — separate from the public node-store catalog above.
-		r.Post("/nodes/send", nodeshareHandler.Send)
+		r.With(dl.Transfer).Post("/nodes/send", nodeshareHandler.Send)
 		r.Get("/nodes/received", nodeshareHandler.ListReceived)
 		r.Delete("/nodes/received/{id}", nodeshareHandler.Dismiss)
 		// The people axis: a node's records and the answers to them. Its own
@@ -688,9 +683,9 @@ func buildAndServe() (*app, error) {
 		r.Delete("/node-records/{id}/response", noderecordsHandler.Unrespond)
 		// Profile media (avatar/banner): raw image bytes in, proxied bytes
 		// out. Serving is friendship + profile-visibility gated pass-through.
-		r.Put("/me/media/{kind}", mediaHandler.Upload)
+		r.With(dl.Transfer).Put("/me/media/{kind}", mediaHandler.Upload)
 		r.Delete("/me/media/{kind}", mediaHandler.Delete)
-		r.Get("/media/{userID}/{kind}", mediaHandler.Serve)
+		r.With(dl.Transfer).Get("/media/{userID}/{kind}", mediaHandler.Serve)
 		// Creating a room is ordinary authed HTTP; the creator becomes its host
 		// (the referee). Rooms are in-memory and ephemeral - nothing persists.
 		r.Post("/rooms", roomsHandler.Create)
@@ -714,8 +709,8 @@ func buildAndServe() (*app, error) {
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
-			r.Post("/activities", activitiesHandler.Publish)
-			r.Put("/activities/{id}/assets/*", activitiesHandler.PublishAsset)
+			r.With(dl.Transfer).Post("/activities", activitiesHandler.Publish)
+			r.With(dl.Transfer).Put("/activities/{id}/assets/*", activitiesHandler.PublishAsset)
 			r.Delete("/activities/{id}", activitiesHandler.Unpublish)
 		})
 		// The pack store: downloadable themes + sound sets. Same shape as the
@@ -727,8 +722,8 @@ func buildAndServe() (*app, error) {
 		r.Group(func(r chi.Router) {
 			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
-			r.Post("/packs", packsHandler.Publish)
-			r.Put("/packs/{id}/assets/*", packsHandler.PublishAsset)
+			r.With(dl.Transfer).Post("/packs", packsHandler.Publish)
+			r.With(dl.Transfer).Put("/packs/{id}/assets/*", packsHandler.PublishAsset)
 			r.Delete("/packs/{id}", packsHandler.Unpublish)
 		})
 		// App releases. Two steps like the pack and game stores, because an
@@ -740,7 +735,7 @@ func buildAndServe() (*app, error) {
 			r.Use(apitokens.RequireScope(apitokens.StoreWrite))
 			r.Use(admin.RequireAdmin(pool))
 			r.Post("/releases", releasesHandler.Publish)
-			r.Put("/releases/{version}/artifact", releasesHandler.PublishArtifact)
+			r.With(dl.Transfer).Put("/releases/{version}/artifact", releasesHandler.PublishArtifact)
 			r.Delete("/releases/{version}", releasesHandler.Unpublish)
 		})
 		// Patch notes, written from the operator's desktop by the release
@@ -760,7 +755,15 @@ func buildAndServe() (*app, error) {
 	roomsHandler.StartReaper(reaperCtx)
 
 	startedAt := time.Now()
-	srv := &http.Server{Addr: cfg.Host + ":" + cfg.Port, Handler: r}
+	// The connection half of the Quick class; Transfer and Live move these per route.
+	srv := &http.Server{
+		Addr:              cfg.Host + ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: deadline.HeaderTimeout,
+		ReadTimeout:       deadline.Default.Quick,
+		WriteTimeout:      deadline.Default.Quick,
+		IdleTimeout:       deadline.IdleTimeout,
+	}
 	// Log the listen line from the calling goroutine, before the console prints
 	// its prompt — otherwise this fires from the serve goroutine a beat later and
 	// lands on the "bombers> " line, eating the prompt.

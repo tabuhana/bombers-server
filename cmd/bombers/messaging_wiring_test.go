@@ -112,18 +112,18 @@ func TestMainRegistersThePictureRoutesUnderTheirScopes(t *testing.T) {
 			scope = rest[:strings.Index(rest, ")")]
 		}
 		for _, route := range []string{
-			`r.Post("/messages/image", messagingHandler.SendImage)`,
-			`r.Get("/messages/{messageID}/image", messagingHandler.ServeImage)`,
+			`r.With(dl.Transfer).Post("/messages/image", messagingHandler.SendImage)`,
+			`r.With(dl.Transfer).Get("/messages/{messageID}/image", messagingHandler.ServeImage)`,
 		} {
 			if strings.Contains(line, route) {
 				found[route] = scope
 			}
 		}
 	}
-	if got := found[`r.Post("/messages/image", messagingHandler.SendImage)`]; got != "MessagesWrite" {
+	if got := found[`r.With(dl.Transfer).Post("/messages/image", messagingHandler.SendImage)`]; got != "MessagesWrite" {
 		t.Errorf("POST /messages/image is under scope %q, want MessagesWrite", got)
 	}
-	if got := found[`r.Get("/messages/{messageID}/image", messagingHandler.ServeImage)`]; got != "MessagesRead" {
+	if got := found[`r.With(dl.Transfer).Get("/messages/{messageID}/image", messagingHandler.ServeImage)`]; got != "MessagesRead" {
 		t.Errorf("GET /messages/{messageID}/image is under scope %q, want MessagesRead", got)
 	}
 }

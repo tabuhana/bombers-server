@@ -33,8 +33,10 @@ func TestEveryAssetRouteCanBePublishedTo(t *testing.T) {
 
 	// The two halves of the same path, as they are actually written. The store's
 	// name is the capture, so a store added later is picked up with no edit here.
-	serves := routeStores(text, `r\.Get\("/([a-z-]+)/\{id\}/assets/\*"`)
-	accepts := routeStores(text, `r\.Put\("/([a-z-]+)/\{id\}/assets/\*"`)
+	// Asset routes move bytes, so they must be registered in the Transfer
+	// class: one registered without it is not counted, and fails the tests.
+	serves := routeStores(text, `r\.With\(dl\.Transfer\)\.Get\("/([a-z-]+)/\{id\}/assets/\*"`)
+	accepts := routeStores(text, `r\.With\(dl\.Transfer\)\.Put\("/([a-z-]+)/\{id\}/assets/\*"`)
 
 	if len(serves) == 0 {
 		t.Fatal("no asset routes found at all — this test has stopped matching the source")
@@ -76,7 +78,7 @@ func TestAssetRoutesCoverEveryStoreThatHasArt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
-	got := sortedKeys(routeStores(string(source), `r\.Get\("/([a-z-]+)/\{id\}/assets/\*"`))
+	got := sortedKeys(routeStores(string(source), `r\.With\(dl\.Transfer\)\.Get\("/([a-z-]+)/\{id\}/assets/\*"`))
 	want := []string{"activities", "apps", "engines", "nodes", "packs"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("stores serving assets = %v, want %v", got, want)
